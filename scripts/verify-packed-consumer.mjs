@@ -118,11 +118,38 @@ try {
       } finally { assert.ok((await reopened.value.close()).ok); }
       durable = "native strict write/reopen passed";
     }
+    const recoverableOptions = { userId: "packed-consumer", directory: join(process.cwd(), "recoverable-store"), durabilityGuarantee: "recoverable" };
+    const recoverable = await openDurableEtherMemories(recoverableOptions);
+    assert.ok(recoverable.ok, JSON.stringify(recoverable));
+    const retained = await recoverable.value.addMemory({ content: "  Packed recoverable facts remain authoritative.  " }, "packed-t5-stable");
+    assert.ok(retained.ok, JSON.stringify(retained));
+    assert.ok((await recoverable.value.rotate()).ok);
+    assert.ok((await recoverable.value.collectGarbage()).ok);
+    assert.ok((await recoverable.value.runMaintenance()).ok);
+    assert.ok((await recoverable.value.close()).ok);
+    const recoverableReopen = await openDurableEtherMemories({ ...recoverableOptions, openMode: "existing" });
+    assert.ok(recoverableReopen.ok, JSON.stringify(recoverableReopen));
+    try {
+      const retry = await recoverableReopen.value.addMemory({ content: "  Packed recoverable facts remain authoritative.  " }, "packed-t5-stable");
+      assert.deepEqual(retry, retained);
+      const snapshot = recoverableReopen.value.exportData(), tip = recoverableReopen.value.tip;
+      assert.ok(snapshot.ok);
+      assert.equal(snapshot.value.memoryNotes.length, 1);
+      const logical = new EtherMemoriesCore({ userId: "packed-consumer" }); assert.ok(logical.importData(snapshot.value).ok);
+      assert.deepEqual(recoverableReopen.value.explainMemory(retained.value.id, { asOf: 1893456000000 }), logical.explainMemory(retained.value.id, { asOf: 1893456000000 }));
+      assert.deepEqual(recoverableReopen.value.inspectMemoryHealth({ asOf: 1893456000000 }), logical.inspectMemoryHealth({ asOf: 1893456000000 }));
+      const plan = recoverableReopen.value.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 }); assert.ok(plan.ok);
+      assert.deepEqual(plan, logical.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 }));
+      assert.deepEqual(recoverableReopen.value.runDreamCycle(plan.value), logical.runDreamCycle(plan.value));
+      assert.deepEqual(recoverableReopen.value.runDreamCycle(plan.value), logical.runDreamCycle(plan.value));
+      assert.deepEqual(recoverableReopen.value.exportData(), snapshot); assert.deepEqual(recoverableReopen.value.tip, tip);
+    } finally { assert.ok((await recoverableReopen.value.close()).ok); }
+    for (const name of ["captureDirectoryIO", "assertWindowsRecoverablePath", "acknowledgmentFor", "activationMatches", "windowsRecoverableDirectoryIO"]) assert.equal(api[name], undefined, name);
     for (const name of ${JSON.stringify([...internalModules, `${pkg.name}/src/index.ts`])}) {
       assert.throws(() => import.meta.resolve(name), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" }, name);
     }
     assert.ok(import.meta.resolve("ether-memories/package.json"));
-    console.log(JSON.stringify({ exports: Object.keys(api).sort(), durable }));
+    console.log(JSON.stringify({ exports: Object.keys(api).sort(), durable, recoverable: "explicit option write/retry/rotation/GC/maintenance/reopen/T2/T3/T4 passed" }));
   `);
   const runtime = JSON.parse(run(["consumer.mjs"]).trim());
   const reference = await import(pathToFileURL(join(root, "dist", "index.js")).href);
@@ -134,7 +161,7 @@ try {
     "openDurableEtherMemories", "parseTransactionSequenceId", "preflightPortableRecords", "preparePortableImport", "sameCommittedTip",
     "toAgentToolResult", "toPlainJson", "toPortableRecords", "toRlmEnv"], "T4 must preserve the frozen 32 runtime exports.");
   await fs.writeFile(join(work, "consumer.mts"), `
-    import { EtherMemoriesCore, openDurableEtherMemories, createMutationId, type DurableEtherMemories,
+    import { EtherMemoriesCore, openDurableEtherMemories, createMutationId, type DurableEtherMemories, type DurableEtherMemoriesOptions,
       type MemoryExplanation, type MemoryHealthReport, type MemoryInspectionOptions,
       type DreamSelector, type DreamBudgets, type DreamCyclePreviewOptions, type DreamPlan,
       type DreamCycleResult, type DreamProposal, type DreamProposalEvidence,
@@ -161,6 +188,10 @@ try {
       const findings: MemoryHealthFinding[] = health.value.invariantFailures;
       const suggestions: MemoryHealthSuggestion[] = health.value.suggestions;
     }
+    const recoverableOptions: DurableEtherMemoriesOptions = { userId: "types", directory: "./recoverable-store", durabilityGuarantee: "recoverable" };
+    await openDurableEtherMemories(recoverableOptions);
+    // @ts-expect-error The option cannot promise power-loss durability.
+    const invalidGuarantee: DurableEtherMemoriesOptions = { userId: "types", directory: "./store", durabilityGuarantee: "power-loss" };
     const opened = await openDurableEtherMemories({ userId: "types", directory: "./store" });
     if (opened.ok) {
       const runtime: DurableEtherMemories = opened.value;
@@ -171,6 +202,10 @@ try {
       if (p.ok) { const analyzed: Result<DreamCycleResult> = runtime.runDreamCycle(p.value); }
       await runtime.rotate(); await runtime.collectGarbage(); await runtime.runMaintenance(); await runtime.close();
     }
+    // @ts-expect-error Internal weak acknowledgements are not public root types.
+    import type { InternalAcknowledgment, RecoverableCommitResult, InternalCommitResult, RecoverableHeadActivationResult, InternalHeadActivationResult } from "ether-memories";
+    // @ts-expect-error Backend/capability selection helpers are not public.
+    import { captureDirectoryIO, assertWindowsRecoverablePath, acknowledgmentFor, activationMatches, windowsRecoverableDirectoryIO } from "ether-memories";
     // @ts-expect-error Internal backend is not a public root type.
     type IO = import("ether-memories").DirectoryIO;
     // @ts-expect-error Internal dependency injection is not public.
@@ -207,7 +242,7 @@ try {
     "--typeRoots", join(root, "node_modules", "@types"), "consumer.mts"]);
   console.log(JSON.stringify({ package: `${pkg.name}@${pkg.version}`, files: expected.length,
     namedExports: runtime.exports.length, blockedModules: internalModules.length + 1,
-    snapshot: "passed", durable: runtime.durable, declarations: "passed" }));
+    snapshot: "passed", durable: runtime.durable, recoverable: runtime.recoverable, declarations: "passed" }));
 } finally {
   await fs.rm(work, { recursive: true, force: true });
 }
