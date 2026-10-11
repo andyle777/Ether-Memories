@@ -92,5 +92,6 @@ reports match for identical logical state and `asOf`.
 Inspection changes no status, revision, timestamps, identity activity, IDs,
 storage, tip or durable bytes. It offers no repair authority and introduces no
 persistence format, receipt, cache, dependency, or algorithm-version change.
-The package/library release identity is0.7.0; T6 changes release metadata only,
-with inspection behavior unchanged from frozen T2/T5.
+The package/library release identity is0.7.0; inspection behavior is unchanged
+from frozen T2/T5. T6 also includes the inherited durable-runtime directory-binding repair
+described in the [release manifest](../RELEASE-MANIFEST.md).

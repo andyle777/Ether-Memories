@@ -24,9 +24,14 @@ Portable Record schema: ether.portable_record.v1
 Dream algorithm: ether.dream.v1
 
 Release identity is separate from persistence and Dream identity. The five frozen
-fixtures, protocol bytes, dependency/plan/proposal identities and persistence
-implementation remain unchanged from canonical T5. No migration, new WAL/receipt
-format, activation journal or persisted durability history is introduced.
+fixtures, protocol bytes and dependency/plan/proposal identities remain unchanged
+from canonical T5. T6 includes one owning persistence correction: the inherited
+durable-runtime directory-binding repair captures an absolute store directory
+before asynchronous open and shares it across inspection, bootstrap, recovery,
+WAL operations and maintenance. A cwd change therefore cannot redirect the runtime
+to another store. All other persistence implementation remains unchanged from T5.
+No migration, new WAL/receipt format, activation journal or persisted durability
+history is introduced.
 
 ## Public release surface
 
@@ -78,8 +83,11 @@ and [Dream analysis](docs/dream-analysis.md).
 
 ## Release gates
 
-Canonical T5 contributes41files/1036active cases. T6 adds only release-integrity
-coverage; final actual counts belong to the exact-SHA freeze report.
+Coverage: 1036 inherited cases + 2 release-integrity regressions + 1 durable-runtime
+directory-binding regression = 1039 active cases across41files. The regression
+checks original-store recovery and tip, write/retry, rotation/GC/maintenance,
+untouched other-store contents and cwd changes during pending open. Final actual
+results belong to the exact-SHA freeze report.
 Fresh clean Node22/24 gates require npmci, toolchain, typecheck, full tests,
 worker exit, build, npm pack, isolated packed consumer and full/production
 audit JSON with all four vulnerability totals0.

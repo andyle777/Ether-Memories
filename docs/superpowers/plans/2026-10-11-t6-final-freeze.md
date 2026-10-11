@@ -63,6 +63,18 @@ Ownership is inherited AF1 Tranche6 durable runtime/persistence authority (origi
 - [ ] All1036 inherited test bodies remain active; two release regressions plus this path regression produce1039 cases across41 files. Commit a normal repair checkpoint above the rejected candidate; push/fetch exact identity, then rerun every clean local/CI/native/package/security/API/claim gate at the replacement SHA and obtain a new fresh independent review.
 - [ ] Minor M1 (docs/dream-plan.md's "Future T4 must" tense) is deferred and reported; it does not justify unrelated edits during the material repair.
 
+The replacement6102f9505da25593c5a5d032eb3bf64e8b44e2be passed all fresh gates and
+its new independent review confirmed the repair and proof. That review remained
+RED (Important1) because the current release manifest and three living documents
+still falsely described T6 as metadata-only/persistence-unchanged and omitted the
+durable-runtime regression. The owning release-documentation correction discloses
+the repair exception, unchanged remaining implementation/formats/identities and
+1036 inherited + 2 release-integrity + 1 durable-runtime = 1039 active cases.
+Add the concise CHANGELOG repair entry, preserve both rejected evidence archives
+and the deferred Minor M1, then commit normally and repeat every fresh exact-SHA
+gate plus a new independent whole-release review. No production or test changes
+are required for this scope-claim correction.
+
 ## Self-review
 
 All44 handoff sections map to Tasks1-2. Every Review Focus has owning metadata/identity/claim/native/package checks. Existing names/types/codecs agree. This fully specified authorized release handoff needs no feature design or renewed approval.

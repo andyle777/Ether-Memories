@@ -17,6 +17,9 @@
 - Cleaned repository/CI and secured the Node22/24 test toolchain, with isolated
   packed-consumer gates and dedicated native Windows filesystem/termination proof.
 - Release identity advances to0.7.0; no migration or new persistence format.
+- Fixed inherited durable-runtime directory-binding: capture the absolute store
+  directory before asynchronous open so later cwd changes cannot redirect recovery,
+  writes or maintenance to another store. Added an isolated real-source regression.
 
 ## 0.6.0 — Durable Persistence
 
