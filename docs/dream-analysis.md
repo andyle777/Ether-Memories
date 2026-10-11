@@ -3,7 +3,9 @@
 Core and the durable facade expose the same synchronous method:
 `runDreamCycle(plan: DreamPlan): Result<DreamCycleResult>`. The root exports
 `DreamCycleResult`, `DreamProposal` and `DreamProposalEvidence` as types only.
-The algorithm remains `ether.dream.v1`; the package remains version 0.6.0.
+The algorithm remains `ether.dream.v1`, independent of the library release
+version0.7.0. T6 changes release metadata only; Dream behavior and identity are
+unchanged from frozen T4/T5.
 
 ```ts
 const preview = core.previewDreamCycle(

@@ -15,7 +15,7 @@ const result = core.previewDreamCycle(
 if (result.ok) console.log(result.value.planId, result.value.selectedSourceIds);
 ```
 
-The algorithm identity is `ether.dream.v1`, independent of library0.6.0.
+The algorithm identity is `ether.dream.v1`, independent of library0.7.0.
 Dreams propose. Memory remains authoritative. Plans select and bind analysis.
 
 ## Selection and eligibility

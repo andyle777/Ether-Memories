@@ -91,5 +91,6 @@ reports match for identical logical state and `asOf`.
 
 Inspection changes no status, revision, timestamps, identity activity, IDs,
 storage, tip or durable bytes. It offers no repair authority and introduces no
-persistence format, receipt, cache, dependency, or version change. Package version
-remains 0.6.0 during the v0.7.0 tranche work.
+persistence format, receipt, cache, dependency, or algorithm-version change.
+The package/library release identity is0.7.0; T6 changes release metadata only,
+with inspection behavior unchanged from frozen T2/T5.

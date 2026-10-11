@@ -1,87 +1,102 @@
-# Ether Memories v0.6.0 Release Manifest
+# Ether Memories v0.7.0 Release Manifest
 
-Version: 0.6.0
-Tag: v0.6.0
-Lineage: v0.5.0 → v0.6.0
-Status: v0.6.0 tag and GitHub Release published; npm publication is separate
-Release integration SHA: `493c7b69813e71af749e34bbf950803eb8ee589b`
-Frozen T10 code-lineage SHA: `6f298aea2cd0278078bf49344f75807355a4e09b`
-Frozen T9 code-lineage parent: `5db87810b60b6693f0953402cdc06f980f5691af`
+Version: 0.7.0
+Tag: v0.7.0
+Lineage: released v0.6.0 → canonical T1–T5 → v0.7.0 candidate
+Status: release candidate; tag above is planned, not created; no merge or publication
+Canonical T5 parent: f4c6a94927cb9226252a55adb4ae7cca123c4a1b
 
-The canonical project name is **Ether Memories** (`ether-memories`). Post-freeze
-naming/status documentation commits do not replace the frozen T10 code-lineage
-SHA. The owner separately authorized PR integration; merge receipts are recorded
-in [integration lineage](docs/v0.6.0-integration.md). The
-[GitHub Release](https://github.com/andyle777/ether-memories/releases/tag/v0.6.0)
-was published on 6 October 2026; this does not assert npm publication.
+The reviewed exact branch-head SHA is the canonical code-lineage identity.
+It is recorded in the final freeze report and draft release PR, not embedded
+self-referentially in this manifest. Eventual merge/tag identity requires separate
+owner authorization. Prior release provenance is preserved in
+[v0.6.0 integration lineage](docs/v0.6.0-integration.md).
 
-This manifest describes the v0.6.0 release surface.
+## Frozen protocol identities
 
-## Canonical goals
+Store schema: ether.memory_store.v0.3
+WAL version: 1
+Receipt version: 1
+HEAD version: 1
+Checkpoint version: 1
+MemoryContext schema: ether.memory_context.v1
+Portable Record schema: ether.portable_record.v1
+Dream algorithm: ether.dream.v1
 
-- Three foundations: Memory Notes, Diary, Mind Graph.
+Release identity is separate from persistence and Dream identity. The five frozen
+fixtures, protocol bytes, dependency/plan/proposal identities and persistence
+implementation remain unchanged from canonical T5. No migration, new WAL/receipt
+format, activation journal or persisted durability history is introduced.
+
+## Public release surface
+
+- Memory Notes, Diary and Mind Graph remain the three foundations.
 - Condensation remains a processor.
-- Trust-first identity, provenance, lifecycle, and import validation.
-- Deterministic, explainable retrieval and bounded `MemoryContext` transport.
-- Agent and RLM adapters without embedding an LLM or RLM in the core.
-- Opt-in durable persistence: WAL-transactional commits under exclusive writer authority,
-  crash-consistent startup recovery, explicit checkpoint rotation with cumulative durable
-  receipts, exact historical result reconstruction, safe retired-WAL reclamation, and
-  explicit reclamation of provably orphaned payload objects only.
+- Deterministic retrieval, bounded MemoryContext and provider-neutral transport remain.
+- Core and Durable expose explainMemory(id), inspectMemoryHealth(),
+  previewDreamCycle(selector, options?) and runDreamCycle(plan).
+- Inspection is bounded logical-state observation, detached and read-only;
+  health findings do not repair persistence or produce a global score.
+- Dream v1 is deterministic, local, bounded and ephemeral. An explicit selector
+  bounds sources; selected-selected relationships only. Run validates the plan
+  against the same captured analysis snapshot and proposes detached suggestions.
+  **Dreams propose. Memory remains authoritative.**
+- Dream uses no LLM, embeddings or RAG, creates no canonical candidate, performs
+  no commit/condense, mutation, scheduler, automatic acceptance or proposal persistence.
+- Durable-open option: durabilityGuarantee?: "strict" | "recoverable".
+- Root runtime exports remain32; internal Dream/persistence/Windows helpers stay private.
 
-## Durable persistence (AF1 Tranches 1–10)
+## Durable behavior and Windows boundary
 
-- `openDurableEtherMemories()` explicit durable factory; in-memory core unchanged.
-- Caller-supplied mutation IDs reconcile lost acknowledgments without duplicate effects.
-- Startup recovery distinguishes a repairable incomplete final WAL tail (synchronized
-  truncation at the last complete transaction, then a full rescan) from authoritative
-  corruption, which always fails closed and requires explicit recovery.
-- `rotate()` activates a new checkpoint plus cumulative receipt ledger; retired WAL bytes
-  are reclaimed only after the new lineage is authoritative.
-- `collectGarbage()` reclaims only payload objects unreachable from every authoritative
-  structure (active WAL refs ∪ cumulative receipt refs); committed objects are permanent
-  roots; no tombstone engine exists.
-- `runMaintenance()` composes the frozen rotation and orphan collection under one
-  explicit deterministic recommendation (configured active-WAL envelope vs. the frozen
-  WAL v1 frame cap); no background or implicitly threshold-triggered maintenance exists.
-  No-op receipts describe that invocation's observation only; exact mutation precommit
-  remains the admission authority. GC runs only after rotation fully succeeds; its
-  failure does not roll back rotation. Writer locks are never auto-broken, and there
-  is zero new persisted maintenance state or policy. See
-  [the frozen T10 contract](docs/af1-tranche10-maintenance-orchestration.md).
-- Bounded-memory operation for unbounded histories with sealed, per-record-authenticated
-  scratch processing and bidirectional coverage proofs before any unlink.
-- Persisted formats unchanged: store schema `ether.memory_store.v0.3`; HEAD/checkpoint
-  framing, WAL v1 wire format, snapshot payload profile, receipt v1, and all frozen
-  fixtures are byte-identical to the frozen AF1 lineage.
+- Caller-supplied mutation IDs reconcile lost acknowledgements without duplicate effects.
+- A repairable incomplete final WAL tail is synchronized/truncated under writer
+  authority and rescanned; authoritative complete/structural corruption always fails closed.
+- Explicit rotation preserves cumulative historical receipts and authoritative
+  lineage before retired-WAL reclamation. Explicit GC collects only provably
+  orphaned payload objects; committed objects remain permanent roots.
+- Explicit maintenance preserves failure precedence and committed rotation;
+  no automatic thresholds or background operations are introduced.
+- Strict remains the default. It fails closed with DURABILITY_UNAVAILABLE on
+  Windows where strict directory/activation barriers cannot be established.
+  Supported POSIX backends may exceed a requested recoverable guarantee.
+- Explicit recoverable mode covers tested application/Node-process termination
+  with OS/filesystem still operating in local Windows conditions, including
+  Windows Server2025 native Node22/24 evidence. Filesystem type is not detected.
+  No universal Windows filesystem, mapped/network/cloud, power-loss, kernel/
+  machine-crash, reset, controller/cache/media failure or corruption guarantee.
+- One backend capability/operations capture serves every durable path. Regular-file
+  sync is mandatory. Weak internal acknowledgement/activation is process-recoverable,
+  never confirmed/atomic. Historical durability remains unknown in receipt ledgerv1.
+- Unsafe path aliases, junctions and hardlinks fail closed; bounded Windows reads
+  use exact bigint identity and nanosecond timestamps. Ordinary Unicode/spaces work.
+- Writer locks are never automatically broken, guessed stale by PID or taken over
+  after a timeout. State recovery does not reacquire writer authority.
 
-## Known limitations
-
-- Native Windows power-loss durability is NOT claimed; durable-mode initialization fails
-  closed with `DURABILITY_UNAVAILABLE` on Windows, and probes use simulated directory
-  barriers there.
-- Durable surface is single-writer, local-filesystem only; no distributed writers.
-- Automatic GC or rotation thresholds, receipt/P7 orphan-debris sweeping, durable bulk
-  operations, migration, backup/restore, and restore epochs are deferred beyond v0.6.0.
+See [Windows process recoverability](docs/t5-windows-recoverability.md),
+[inspection](docs/memory-inspection.md), [Dream preview](docs/dream-plan.md)
+and [Dream analysis](docs/dream-analysis.md).
 
 ## Release gates
 
-The frozen T10 suite contains 29 files / 687 tests, including 21 maintenance
-orchestration tests. The released integration SHA adds two package-lock metadata
-regressions, for 29 files / 689 tests at that SHA. These are historical counts,
-not a claim about subsequent development candidates.
+Canonical T5 contributes41files/1036active cases. T6 adds only release-integrity
+coverage; final actual counts belong to the exact-SHA freeze report.
+Fresh clean Node22/24 gates require npmci, toolchain, typecheck, full tests,
+worker exit, build, npm pack, isolated packed consumer and full/production
+audit JSON with all four vulnerability totals0.
 
-Run:
-```bash
-npm ci
-npm run typecheck
-npm test
-npm run build
-npm pack
-npm run verify:packed
-```
-plus the compiled recovery, runtime, rotation, garbage-collection, and default
-10,000-mutation maintenance probes
-(`--simulate-directory-barriers` on Windows), frozen fixture digest gates,
-public-surface and declaration gates, the destructive-collector containment audit over
-every emitted module, and packed-consumer verification, before publishing.
+All four standard Ubuntu/Windows × Node22/24 jobs must pass at the exact candidate.
+The existing Windows2025 workflow must freshly pass both Node jobs, all production/
+integration cases, required negative controls, filesystem assertions and six
+semantic-marker termination scenarios with stable exactly-once retry convergence.
+Required native JSON identifies candidate/runtime/clean checkout and is preserved.
+
+Generated declarations,32rootruntimeexports, blocked internals, intentional
+tarball contents, five exact fixture identities and all documentation claims
+are audited before fresh independent hostile review with no unresolved material
+finding. Archive-byte reproducibility across OSes is not claimed.
+
+## Excluded release actions and scope
+
+Freeze does not authorize merging, tagging, npm publication or a GitHub release.
+No T7. Post-v0.7 work includes migrations, backup/restore, distributed writers
+and broader storage guarantees; none is part of this candidate.

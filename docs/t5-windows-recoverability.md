@@ -95,4 +95,6 @@ Final freeze requires clean Node22/24 local security/regression/package gates,
 four standard CI jobs, both dedicated native Windows jobs at the exact candidate
 SHA, and fresh independent hostile review with no unresolved material finding.
 Raw JSON reports include candidate/runtime identity and checkout cleanliness.
-Package version remains0.6.0; release metadata, merging and T6 remain excluded.
+At the frozen T5 checkpoint, package version remained0.6.0 and release metadata,
+merging and T6 were excluded. T6 advances only the release identity to0.7.0;
+the Windows contract and native proof mechanics above remain unchanged.

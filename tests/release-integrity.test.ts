@@ -11,6 +11,8 @@ import { LIBRARY_VERSION, STORE_SCHEMA_VERSION, MEMORY_CONTEXT_SCHEMA_VERSION,
 import { openDurableEtherMemoriesInternal, createMutationId } from "../src/core/DurableEtherMemories.js";
 import { value } from "./helpers/persistence.js";
 import { bootstrap } from "./helpers/recovery.js";
+import { encodeReceiptEntryLine, encodeReceiptHeaderLine, ROOT_PREDECESSOR_DIGEST } from "../src/persistence/receiptLedger.js";
+import { planFor, requireValue, seedDreamCore } from "./helpers/dream-analysis.js";
 
 /**
  * Canonical LF form: every release-surface text gate is invariant under
@@ -21,7 +23,7 @@ const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.m
   .replace(/\r\n/g, "\n");
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 
-describe("v0.6.0 release metadata consistency", () => {
+describe("v0.7.0 release metadata consistency", () => {
   const pinned: Record<string, string> = {
     "persistence-wire-v1.json": "ecc0d9b2276c9569bec4a3a139fb0ea3da12186459330c292dfb9c04255524af",
     "portable-record-v1.json": "97626d9819a977b0d73687ee9a57ba7dfbc046c14476afad1ecc0faeeb951e5b",
@@ -31,9 +33,9 @@ describe("v0.6.0 release metadata consistency", () => {
   };
 
   it("pins the library release version in source and package metadata", () => {
-    expect(LIBRARY_VERSION).toBe("0.6.0");
+    expect(LIBRARY_VERSION).toBe("0.7.0");
     const pkg = JSON.parse(read("../package.json"));
-    expect(pkg.version).toBe("0.6.0");
+    expect(pkg.version).toBe("0.7.0");
     expect(pkg.version).toBe(LIBRARY_VERSION);
   });
 
@@ -114,15 +116,52 @@ describe("v0.6.0 release metadata consistency", () => {
     expect(sha256(frameBytes)).toBe(walWire.frameSha256);
     expect(frameBytes.includes(Buffer.from(LIBRARY_VERSION, "utf8"))).toBe(false);
   });
+
+  it("keeps the release manifest's protocol identities independent of its release identity", () => {
+    const manifest = read("../RELEASE-MANIFEST.md");
+    const expected = {
+      "Store schema": "ether.memory_store.v0.3", "WAL version": "1", "Receipt version": "1",
+      "HEAD version": "1", "Checkpoint version": "1", "MemoryContext schema": "ether.memory_context.v1",
+      "Portable Record schema": "ether.portable_record.v1", "Dream algorithm": "ether.dream.v1"
+    };
+    const fields = Object.fromEntries(manifest.split("\n").filter(line => line.includes(": "))
+      .map(line => { const separator = line.indexOf(": "); return [line.slice(0, separator), line.slice(separator + 2)]; }));
+    for (const [field, expectedValue] of Object.entries(expected)) expect(fields[field], field).toBe(expectedValue);
+  });
+
+  it("preserves canonical T5 receipt and Dream identities across the library release bump", () => {
+    // Captured from exact canonical T5 f4c6a94927cb9226252a55adb4ae7cca123c4a1b
+    // before changing LIBRARY_VERSION. These golden expectations never depend on it.
+    const entry = value(encodeReceiptEntryLine({ mutationId: "release-mutation", intentDigest: "1".repeat(64),
+      txId: "1", transactionDigest: "2".repeat(64), operations: [{ type: "ether.note.put", version: "1",
+        payload: { id: "release-note", content: "release identity control" } }] }));
+    const header = value(encodeReceiptHeaderLine({ format: "ether.receipts", version: "1", storeId: "store-a", epochId: "epoch-a",
+      retiredCheckpointDigest: "a".repeat(64), predecessorLedgerDigest: ROOT_PREDECESSOR_DIGEST, entryCount: 1, payloadBytes: entry.byteLength }));
+    const receipt = Buffer.concat([header, entry]);
+    expect(sha256(receipt)).toBe("1225bec9c31b8ee2d5703ff03ea9e5c5d63edc81df131754b304c5ffc0d3fc70");
+    expect(receipt.includes(Buffer.from(LIBRARY_VERSION, "utf8"))).toBe(false);
+    const core = seedDreamCore([{ id: "a", content: "  Alpha source carries stable facts.  " },
+      { id: "b", content: "  Beta source carries different facts.  " }],
+    [{ id: "ab", source: "a", target: "b", relationship: "supports" }]);
+    const plan = planFor(core, { kind: "ids", ids: ["a", "b"] });
+    const result = requireValue(core.runDreamCycle(plan));
+    expect(plan.algorithm).toBe("ether.dream.v1");
+    expect(plan.dependencyDigest).toBe("6fa9710b9363ab414f1671ffe3ef43003b2515c45e86e1dddbdda229860371b6");
+    expect(plan.planId).toBe("b62a790d386598bad929c2275149c9bd0cf21d0bed698f6c03855b859a09fcb4");
+    expect(result.proposals.map(proposal => proposal.proposalId)).toEqual([
+      "b0db6bb26c8588d9d2573d6dbc0eccc49fb9fc019a1825bcf3d9faf13ac4b15f",
+      "45107b3dcccbb7df243d62e1a396ed4fee80d186fd47e35dd1678587faefad96"
+    ]);
+  });
 });
 
-describe("v0.6.0 durable release-integrity smoke", () => {
+describe("v0.7.0 durable release-integrity smoke", () => {
   const cleanup: string[] = [];
   afterEach(async () => {
     for (const path of cleanup.splice(0)) await fs.rm(path, { recursive: true, force: true });
   });
 
-  it("persists and exports the frozen store schema under release 0.6.0", async () => {
+  it("persists and exports the frozen store schema under release 0.7.0", async () => {
     const store = await bootstrap();
     cleanup.push(store.parent);
     const runtime = value(await openDurableEtherMemoriesInternal(
@@ -144,7 +183,7 @@ describe("v0.6.0 durable release-integrity smoke", () => {
   });
 });
 
-describe("v0.6.0 release documentation integrity", { timeout: 120_000 }, () => {
+describe("v0.7.0 release documentation integrity", { timeout: 120_000 }, () => {
   it("resolves every local link in the release README", () => {
     const readme = read("../README.md");
     const links = [...readme.matchAll(/\]\(([^)]+)\)/g)].map(match => match[1])

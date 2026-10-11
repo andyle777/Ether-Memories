@@ -1,4 +1,4 @@
-# Ether Memories v0.6.0
+# Ether Memories v0.7.0
 
 Canonical project name: **Ether Memories**; package and repository: `ether-memories`.
 
@@ -12,7 +12,19 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
-## Dream Plan preview
+## v0.7.0 — Explainability, Dream Cycle & Windows Recoverability
+
+Core and the durable facade expose `explainMemory`, `inspectMemoryHealth`,
+`previewDreamCycle` and `runDreamCycle`. Inspection reports bounded, detached,
+read-only evidence. Dream analysis is local, deterministic, bounded and ephemeral:
+it uses no LLM, embeddings or RAG, changes no canonical memory and never applies
+or persists proposals. **Dreams propose. Memory remains authoritative.**
+
+Windows process recoverability is explicitly opt-in through
+`durabilityGuarantee: "recoverable"`; strict remains the default. Release identity
+advances to0.7.0 while persistence formats and Dream v1 identity remain unchanged.
+
+### Dream Plan preview
 
 `previewDreamCycle(selector, options?)` selects and binds a bounded, ephemeral
 plan on Core and the durable facade. Provide explicit IDs, exact tags, a local
@@ -32,9 +44,9 @@ again. Core and the durable facade expose this synchronous method; see
 [Dream Analysis](docs/dream-analysis.md) for the preview → run example,
 evidence, exact duplicate rules and fixed output limits.
 
-## v0.6.0 — Durable Persistence
+## Durable Persistence
 
-v0.6.0 adds an opt-in durable transactional store for the same three foundations: an append-only write-ahead log, exclusive writer authority, and crash-consistent startup recovery. The in-memory core and all v0.5.0 deterministic-retrieval behavior are unchanged.
+Introduced in v0.6.0, the opt-in durable transactional store serves the same three foundations: an append-only write-ahead log, exclusive writer authority, and crash-consistent startup recovery. The in-memory core and deterministic retrieval remain supported.
 
 ### Durable persistence
 
@@ -58,19 +70,49 @@ for the frozen T10 contract and code-lineage receipt.
 
 ### Platform support
 
-Durable mode requires a platform with native file and directory durability barriers (Linux and macOS). On Windows, native directory durability is unavailable: durable-mode initialization fails closed with `DURABILITY_UNAVAILABLE` rather than weakening the protocol, and the test suite and probes run with simulated directory barriers. Native Windows power-loss durability is not claimed.
+Strict is the default durability guarantee. Linux/macOS backends provide native
+file and directory barriers; on Windows strict initialization fails closed with
+`DURABILITY_UNAVAILABLE` when directory/activation barriers cannot be established.
+Explicit `durabilityGuarantee: "recoverable"` supports tested application/Node-process
+termination while the OS and filesystem remain operating in local Windows
+conditions. Native Windows Server2025 evidence covers Node22 and24; filesystem
+type is not detected and universal filesystem support is not claimed.
+
+Regular-file synchronization is mandatory. Recoverable mode does not promise
+power-loss, kernel/machine-crash, reset, network/mapped/cloud storage or
+controller/cache/media-failure durability. Weak internal acknowledgements remain
+process-recoverable, never confirmed/atomic; historical durability is unknown in
+receipt ledgerv1. Writer locks are never auto-broken and recovery does not reacquire
+authority. See [Windows process recoverability](docs/t5-windows-recoverability.md)
+for exact tested boundaries and path/identity protections.
 
 ### Compatibility
 
-v0.6.0 preserves the persisted schema contracts:
+v0.7.0 preserves the persisted schema contracts:
 
 - Store: `ether.memory_store.v0.3`
 - MemoryContext: `ether.memory_context.v1`
 - Portable Record: `ether.portable_record.v1`
 
+WAL, receipts, HEAD and checkpoints remain version1. Dream remains
+`ether.dream.v1`; the release version is separate from these identities.
+
 The durable store persists the same canonical snapshot payload; its on-disk layout (HEAD, checkpoints, WAL, receipts) is an internal implementation detail, not a public path contract. Legacy snapshot persistence (`EtherMemoriesCore` with a `StoragePort`/`storagePath`) is unchanged.
 
 ### Release verification
+
+The v0.7.0 candidate requires fresh clean Node22/24 local typecheck, full tests,
+worker-exit, build, pack and isolated packed-consumer gates, plus full and
+production security audits with zero vulnerability totals. All four standard
+Ubuntu/Windows × Node22/24 CI jobs and both dedicated Windows2025 native jobs
+must pass at its exact branch-head SHA. Native proof includes production and
+integration cases, missing-evidence negative controls, filesystem identity checks
+and six synchronized process-termination scenarios with exactly-once retry
+convergence. The final freeze report and draft release PR record that reviewed
+SHA as canonical; a future merge/tag identity requires separate owner approval.
+See [the release manifest](RELEASE-MANIFEST.md).
+
+The following v0.6.0 record is historical provenance, not candidate gate evidence.
 
 AF1 Tranche 10 is frozen by owner decision at code-lineage SHA
 `6f298aea2cd0278078bf49344f75807355a4e09b`. Subsequent naming and status documentation
@@ -197,20 +239,27 @@ It does not provide authentication, authorization, multi-tenant security, distri
 
 ```bash
 npm ci
+npm run verify:toolchain
 npm run typecheck
 npm test
+npm run verify:workers
 npm run build
 npm pack
 npm run verify:packed
+npm audit --json
+npm audit --omit=dev --json
 ```
 
 The packed-consumer gate installs the generated tarball in an isolated temporary
 project, checks snapshot persistence and the public durable facade, compiles its
 declarations, and verifies that package exports block internal module imports.
-On Windows it verifies the existing strict factory's `DURABILITY_UNAVAILABLE`
-result; Linux exercises native strict durable writes and reopen. CI runs these
-checks on Linux and Windows with Node 22 and 24. Tests run before build so a
-clean checkout does not require a pre-existing `dist/`.
+On Windows it verifies the strict factory's `DURABILITY_UNAVAILABLE` result and
+explicit recoverable operations/reopen; Linux exercises native strict durable
+writes and reopen. It also exercises inspection and the preview → run Dream
+sequence. CI runs these checks on Linux and Windows with Node22 and24. Tests run
+before build so a clean checkout does not require a pre-existing `dist/`.
+The frozen test toolchain is Vitest4.1.11, Vite7.3.6 and source-map-js1.2.2,
+with no Tinypool dependency.
 
 ## Contributors and acknowledgements
 

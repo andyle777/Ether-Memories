@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/v0.7.0-t5-windows-final-pass
+      - release/v0.7.0-t6-final-freeze
   workflow_dispatch:
 
 jobs:
