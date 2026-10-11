@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import * as publicApi from "../src/index.js";
 import type { MemoryNote } from "../src/types/index.js";
@@ -62,6 +64,81 @@ const losingAckWalIO = (): { io: WalIO; arm: () => void } => {
 };
 
 describe("durable runtime lifecycle", { timeout: 120_000 }, () => {
+  it("binds a relative store directory before async open and retains it after cwd changes", async () => {
+    // cwd is process-wide and cannot change in a Vitest worker thread. Compile
+    // actual sources into an isolated stage so this test also works before build.
+    const { parent } = await fresh();
+    const repo = fileURLToPath(new URL("../", import.meta.url));
+    const stage = join(parent, "stage");
+    const compiled = spawnSync(process.execPath, [join(repo, "node_modules/typescript/lib/tsc.js"),
+      "-p", join(repo, "tsconfig.build.json"), "--outDir", join(stage, "dist")],
+      { cwd: repo, encoding: "utf8", timeout: 90_000 });
+    expect(compiled.status, `${compiled.stdout}\n${compiled.stderr}`).toBe(0);
+    await fs.writeFile(join(stage, "package.json"), JSON.stringify({ type: "module" }));
+    await fs.symlink(join(repo, "node_modules"), join(stage, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir");
+    const script = join(parent, "relative-store.mjs");
+    await fs.writeFile(script, `
+      import assert from "node:assert/strict";
+      import fs from "node:fs/promises";
+      import path from "node:path";
+      import { openDurableEtherMemories } from ${JSON.stringify(pathToFileURL(join(stage, "dist/index.js")).href)};
+      const root = ${JSON.stringify(parent)};
+      const originalCwd = process.cwd();
+      const handles = [];
+      const value = result => { assert.equal(result.ok, true, JSON.stringify(result)); return result.value; };
+      const open = async directory => {
+        const runtime = value(await openDurableEtherMemories({ userId: "relative-owner", directory,
+          durabilityGuarantee: "recoverable" }));
+        handles.push(runtime); return runtime;
+      };
+      const contents = runtime => value(runtime.exportData()).memoryNotes.map(note => note.content).sort();
+      const a = path.join(root, "cwd-a"), b = path.join(root, "cwd-b");
+      try {
+        await fs.mkdir(a); await fs.mkdir(b);
+        for (const [cwd, content, id] of [[a, "ORIGINAL STORE A", "seed-a"], [b, "OTHER STORE B", "seed-b"]]) {
+          const runtime = await open(path.join(cwd, "store"));
+          value(await runtime.addMemory({ content }, id)); value(await runtime.close());
+        }
+        process.chdir(a);
+        const runtime = await open("./store");
+        assert.deepEqual(contents(runtime), ["ORIGINAL STORE A"], "original store positive control");
+        const tip = value(runtime.tip);
+        process.chdir(b);
+        value(await runtime.recover());
+        assert.deepEqual(contents(runtime), ["ORIGINAL STORE A"], "recovery must retain the original store");
+        assert.deepEqual(value(runtime.tip), tip, "recovery must retain the original tip");
+        const command = { content: "WRITTEN TO A AFTER CHDIR" };
+        const added = value(await runtime.addMemory(command, "write-after-chdir"));
+        const committed = value(runtime.tip);
+        assert.deepEqual(value(await runtime.addMemory(command, "write-after-chdir")), added, "retry receipt");
+        assert.deepEqual(value(runtime.tip), committed, "retry must not commit twice");
+        value(await runtime.rotate()); value(await runtime.collectGarbage());
+        value(await runtime.runMaintenance()); value(await runtime.recover());
+        assert.deepEqual(contents(runtime), ["ORIGINAL STORE A", "WRITTEN TO A AFTER CHDIR"]);
+        value(await runtime.close());
+        const other = await open(path.join(b, "store"));
+        assert.deepEqual(contents(other), ["OTHER STORE B"], "other store must remain unchanged");
+        value(await other.close());
+        process.chdir(a);
+        // Change cwd while initial inspection is pending, before the open promise resolves.
+        const opening = open("./store");
+        process.chdir(b);
+        const duringOpen = await opening;
+        assert.deepEqual(contents(duringOpen), ["ORIGINAL STORE A", "WRITTEN TO A AFTER CHDIR"],
+          "async open must use its initially captured directory");
+        value(await duringOpen.recover()); value(await duringOpen.close());
+        console.log("relative-store binding, recovery, retry, rotation, GC, maintenance and pending open PASS");
+      } finally {
+        for (const runtime of handles) await runtime.close();
+        process.chdir(originalCwd);
+      }
+    `);
+    const exercised = spawnSync(process.execPath, [script], { cwd: parent, encoding: "utf8", timeout: 90_000 });
+    expect(exercised.status, `${exercised.stdout}\n${exercised.stderr}`).toBe(0);
+    expect(exercised.stdout).toContain("relative-store binding, recovery, retry, rotation, GC, maintenance and pending open PASS");
+  });
+
   it("bootstraps a fresh store, serves empty committed state and reopens identically", async () => {
     const { directory } = await fresh();
     const io = simulatedDirectoryIO();

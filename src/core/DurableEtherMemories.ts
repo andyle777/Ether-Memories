@@ -40,7 +40,7 @@ import type {
 import type { CommittedTip, MutationId, PersistenceErrorCode } from "../types/persistence.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { cloneValue } from "../utils/clone.js";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createId } from "../utils/ids.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 import type { AddNoteInput, UpdateNoteInput } from "./MemoryNotes.js";
@@ -705,8 +705,11 @@ class DurableRuntime implements DurableEtherMemories {
     if (typeof options.directory !== "string" || !options.directory.trim()) {
       return err("INVALID_INPUT", "A durable store directory is required.");
     }
+    // Bind the store once, before asynchronous I/O can yield to a cwd change.
+    // Recovery, WAL commits and maintenance must share this same authority.
+    const directory = resolve(options.directory);
     const openMode = options.openMode ?? "auto";
-    const inspected = await new FsDurableStore({ directory: options.directory }, io).inspect();
+    const inspected = await new FsDurableStore({ directory }, io).inspect();
     if (!inspected.ok) return inspected;
     if (inspected.value.state === "legacy-json") {
       return err("PERSISTENCE_CORRUPTION", "Durable mode never converts or overwrites a legacy store; migration is a future tranche.");
@@ -718,10 +721,10 @@ class DurableRuntime implements DurableEtherMemories {
       return err("INVALID_INPUT", "openMode \"existing\" requires an active durable store.");
     }
     if (inspected.value.state === "missing") {
-      const bootstrapped = await DurableRuntime.bootstrap(options, io);
+      const bootstrapped = await DurableRuntime.bootstrap(options, io, directory);
       if (!bootstrapped.ok) return bootstrapped;
     }
-    const runtime = new DurableRuntime(options.directory, options.userId, io, files, indexDiskBytes,
+    const runtime = new DurableRuntime(directory, options.userId, io, files, indexDiskBytes,
       maxActiveWalBytes, gcInstrumentation);
     const recovered = await runtime.recover();
     if (!recovered.ok) return recovered;
@@ -729,7 +732,7 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   /** One-time initial store creation; never reinitializes an existing store. */
-  private static async bootstrap(options: DurableEtherMemoriesOptions, io: DirectoryIO): Promise<Result<undefined>> {
+  private static async bootstrap(options: DurableEtherMemoriesOptions, io: DirectoryIO, directory: string): Promise<Result<undefined>> {
     const now = new Date();
     const snapshot: EtherSnapshot = {
       schemaVersion: STORE_SCHEMA_VERSION,
@@ -750,7 +753,7 @@ class DurableRuntime implements DurableEtherMemories {
       schemaVersion: STORE_SCHEMA_VERSION, digestAlgorithm: DIGEST_ALGORITHM,
       checkpoint: checkpoint.value.identity, walFormat: { format: "ether.wal", version: "1" }
     };
-    const initialized = await new FsDurableStore({ directory: options.directory }, io)
+    const initialized = await new FsDurableStore({ directory }, io)
       .initialize({ head, checkpointBytes: checkpoint.value.bytes });
     return initialized.ok ? ok(undefined) : initialized;
   }
