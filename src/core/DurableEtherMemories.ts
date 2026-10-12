@@ -28,13 +28,19 @@
  * state changes only through the durable path above.
  */
 
+import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } from "../types/index.js";
+import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
+import type { DreamSelector, DreamCyclePreviewOptions, DreamPlan } from "../types/dreamPlan.js";
+import { previewDreamCycle } from "./dreamPlan.js";
+import type { DreamCycleResult } from "../types/dreamAnalysis.js";
+import { runDreamCycle } from "./dreamExecution.js";
 import type {
   BuildMemoryContextInput, DiaryEntry, EtherSnapshot, MemoryContext, MemoryNote, MindGraphEdge, RetrievalMatch, UserIdentity
 } from "../types/index.js";
 import type { CommittedTip, MutationId, PersistenceErrorCode } from "../types/persistence.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { cloneValue } from "../utils/clone.js";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createId } from "../utils/ids.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 import type { AddNoteInput, UpdateNoteInput } from "./MemoryNotes.js";
@@ -61,7 +67,7 @@ import { required, withRecoveryAuthority } from "../persistence/recoveryAuthorit
 import { WalFileScan } from "../persistence/walFileScan.js";
 import { openAuthoritativeReceiptLedger } from "../persistence/receiptLedger.js";
 import { sameCommittedTip } from "../utils/durablePersistence.js";
-import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "../persistence/directoryIO.js";
+import { assertWindowsRecoverablePath, captureDirectoryIO, DirectoryIoError, nodeDirectoryIO, windowsRecoverableDirectoryIO, type DirectoryIO } from "../persistence/directoryIO.js";
 import { nodeWalIO, type WalIO } from "../persistence/walIO.js";
 import { DIGEST_ALGORITHM, HEAD_FORMAT, HEAD_VERSION, encodeCheckpoint, type PersistedStoreHead } from "../persistence/codecs.js";
 import { parseTransactionSequenceId } from "../utils/durablePersistence.js";
@@ -80,6 +86,9 @@ export interface DurableEtherMemoriesOptions {
    * - "existing": require an active store, otherwise fail closed.
    */
   readonly openMode?: "auto" | "create" | "existing";
+  /** Explicit weaker process-failure contract on Windows local filesystems.
+   * Strict remains the default. No power-loss durability or persisted history is claimed. */
+  readonly durabilityGuarantee?: "strict" | "recoverable";
 }
 
 /** Public observable lifecycle. "Opening" is factory-internal: no object escapes during it. */
@@ -162,6 +171,10 @@ export interface DurableEtherMemories {
   buildMemoryContext(input: BuildMemoryContextInput): Result<MemoryContext>;
   getSystemState(): Result<UserIdentity>;
   exportData(): Result<EtherSnapshot>;
+  explainMemory(id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation>;
+  inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport>;
+  previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan>;
+  runDreamCycle(plan: DreamPlan): Result<DreamCycleResult>;
   addMemory(input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>>;
   updateMemory(id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>>;
   promoteCandidate(id: string, mutationId: string): Promise<Result<MemoryNote>>;
@@ -692,8 +705,11 @@ class DurableRuntime implements DurableEtherMemories {
     if (typeof options.directory !== "string" || !options.directory.trim()) {
       return err("INVALID_INPUT", "A durable store directory is required.");
     }
+    // Bind the store once, before asynchronous I/O can yield to a cwd change.
+    // Recovery, WAL commits and maintenance must share this same authority.
+    const directory = resolve(options.directory);
     const openMode = options.openMode ?? "auto";
-    const inspected = await new FsDurableStore({ directory: options.directory }, io).inspect();
+    const inspected = await new FsDurableStore({ directory }, io).inspect();
     if (!inspected.ok) return inspected;
     if (inspected.value.state === "legacy-json") {
       return err("PERSISTENCE_CORRUPTION", "Durable mode never converts or overwrites a legacy store; migration is a future tranche.");
@@ -705,10 +721,10 @@ class DurableRuntime implements DurableEtherMemories {
       return err("INVALID_INPUT", "openMode \"existing\" requires an active durable store.");
     }
     if (inspected.value.state === "missing") {
-      const bootstrapped = await DurableRuntime.bootstrap(options, io);
+      const bootstrapped = await DurableRuntime.bootstrap(options, io, directory);
       if (!bootstrapped.ok) return bootstrapped;
     }
-    const runtime = new DurableRuntime(options.directory, options.userId, io, files, indexDiskBytes,
+    const runtime = new DurableRuntime(directory, options.userId, io, files, indexDiskBytes,
       maxActiveWalBytes, gcInstrumentation);
     const recovered = await runtime.recover();
     if (!recovered.ok) return recovered;
@@ -716,7 +732,7 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   /** One-time initial store creation; never reinitializes an existing store. */
-  private static async bootstrap(options: DurableEtherMemoriesOptions, io: DirectoryIO): Promise<Result<undefined>> {
+  private static async bootstrap(options: DurableEtherMemoriesOptions, io: DirectoryIO, directory: string): Promise<Result<undefined>> {
     const now = new Date();
     const snapshot: EtherSnapshot = {
       schemaVersion: STORE_SCHEMA_VERSION,
@@ -737,7 +753,7 @@ class DurableRuntime implements DurableEtherMemories {
       schemaVersion: STORE_SCHEMA_VERSION, digestAlgorithm: DIGEST_ALGORITHM,
       checkpoint: checkpoint.value.identity, walFormat: { format: "ether.wal", version: "1" }
     };
-    const initialized = await new FsDurableStore({ directory: options.directory }, io)
+    const initialized = await new FsDurableStore({ directory }, io)
       .initialize({ head, checkpointBytes: checkpoint.value.bytes });
     return initialized.ok ? ok(undefined) : initialized;
   }
@@ -764,6 +780,34 @@ class DurableRuntime implements DurableEtherMemories {
     const generation = this.#readable();
     if (!generation.ok) return generation;
     return ok(generation.value.retriever.query(text, options).map(x => cloneValue(x.memory)));
+  }
+
+  explainMemory(id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation> {
+    const generation = this.#readable();
+    if (!generation.ok) return generation;
+    if (this.#lifecycle === "recovery-required") return err("RECOVERY_REQUIRED", "Recover before inspecting logical memory.");
+    return explainMemory(generation.value.notes, generation.value.graph, id, options);
+  }
+
+  inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport> {
+    const generation = this.#readable();
+    if (!generation.ok) return generation;
+    if (this.#lifecycle === "recovery-required") return err("RECOVERY_REQUIRED", "Recover before inspecting logical memory.");
+    return inspectMemoryHealth(generation.value.notes, generation.value.graph, options);
+  }
+
+  previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> {
+    const generation = this.#readable();
+    if (!generation.ok) return generation;
+    if (this.#lifecycle === "recovery-required") return err("RECOVERY_REQUIRED", "Recover before planning logical memory.");
+    return previewDreamCycle(generation.value.notes, generation.value.graph, selector, options);
+  }
+
+  runDreamCycle(plan: DreamPlan): Result<DreamCycleResult> {
+    const generation = this.#readable();
+    if (!generation.ok) return generation;
+    if (this.#lifecycle === "recovery-required") return err("RECOVERY_REQUIRED", "Recover before analyzing logical memory.");
+    return runDreamCycle(generation.value.notes, generation.value.graph, plan);
   }
 
   queryMemoriesDetailed(text: string, options?: QueryOptions): Result<RetrievalMatch[]> {
@@ -1156,6 +1200,10 @@ const createFacade = (implementation: DurableRuntime): DurableEtherMemories => O
   buildMemoryContext: (input: BuildMemoryContextInput): Result<MemoryContext> => implementation.buildMemoryContext(input),
   getSystemState: (): Result<UserIdentity> => implementation.getSystemState(),
   exportData: (): Result<EtherSnapshot> => implementation.exportData(),
+  explainMemory: (id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation> => implementation.explainMemory(id, options),
+  inspectMemoryHealth: (options?: MemoryInspectionOptions): Result<MemoryHealthReport> => implementation.inspectMemoryHealth(options),
+  previewDreamCycle: (selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> => implementation.previewDreamCycle(selector, options),
+  runDreamCycle: (plan: DreamPlan): Result<DreamCycleResult> => implementation.runDreamCycle(plan),
   addMemory: (input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.addMemory(input, mutationId),
   updateMemory: (id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.updateMemory(id, patch, mutationId),
   promoteCandidate: (id: string, mutationId: string): Promise<Result<MemoryNote>> => implementation.promoteCandidate(id, mutationId),
@@ -1178,12 +1226,31 @@ const withFacade = (opened: Promise<Result<DurableRuntime>>): Promise<Result<Dur
   opened.then(result => result.ok ? ok(createFacade(result.value)) : result);
 
 /** Public durable factory: only supported user configuration; no injection points. */
-export const openDurableEtherMemories = (options: DurableEtherMemoriesOptions): Promise<Result<DurableEtherMemories>> =>
-  withFacade(DurableRuntime.open(options));
+export const openDurableEtherMemories = (options: DurableEtherMemoriesOptions): Promise<Result<DurableEtherMemories>> => {
+  const selected = selectDirectoryIO(options);
+  if (!selected.ok) return Promise.resolve(selected);
+  return withFacade(DurableRuntime.open(options, selected.value));
+};
 
 /** Internal test factory with protocol-testing dependency injection; never exported from the package root. */
 export const openDurableEtherMemoriesInternal = (options: DurableEtherMemoriesOptions,
-  dependencies: DurableDependencies = {}): Promise<Result<DurableEtherMemories>> =>
-  withFacade(DurableRuntime.open(options, dependencies.io ?? nodeDirectoryIO, dependencies.files ?? nodeWalIO,
+  dependencies: DurableDependencies = {}): Promise<Result<DurableEtherMemories>> => {
+  const selected = selectDirectoryIO(options, dependencies.io);
+  if (!selected.ok) return Promise.resolve(selected);
+  return withFacade(DurableRuntime.open(options, selected.value, dependencies.files ?? nodeWalIO,
     dependencies.indexDiskBytes ?? DEFAULT_MAX_INDEX_BYTES, dependencies.maxActiveWalBytes ?? MAX_ACTIVE_WAL_BYTES,
     dependencies.gcInstrumentation ?? { at: async () => undefined }));
+};
+
+function selectDirectoryIO(options: DurableEtherMemoriesOptions, injected?: DirectoryIO): Result<DirectoryIO> {
+  if (!record(options)) return err("INVALID_INPUT", "Durable runtime options are required.");
+  const requested = options.durabilityGuarantee ?? "strict";
+  if (requested !== "strict" && requested !== "recoverable") return err("INVALID_INPUT", "Invalid durability guarantee.");
+  if (requested === "recoverable" && process.platform === "win32" && typeof options.directory === "string") {
+    try { assertWindowsRecoverablePath(options.directory); }
+    catch (error) { return err("DURABILITY_UNAVAILABLE", (error as Error).message); }
+  }
+  // On supported POSIX platforms the strict backend exceeds a recoverable request.
+  return ok(captureDirectoryIO(injected ?? (requested === "recoverable" && process.platform === "win32"
+    ? windowsRecoverableDirectoryIO : nodeDirectoryIO)));
+}

@@ -17,6 +17,12 @@ import { cloneValue } from "../utils/clone.js";
 import { preparePortableImport, type PortableImportInput, type PortableImportLimits } from "../adapters/portableImport.js";
 import type { PortableImportReceipt } from "../types/index.js";
 import { prepareSnapshot, commitSnapshot } from "./snapshotPreparation.js";
+import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } from "../types/index.js";
+import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
+import type { DreamSelector, DreamCyclePreviewOptions, DreamPlan } from "../types/dreamPlan.js";
+import { previewDreamCycle } from "./dreamPlan.js";
+import type { DreamCycleResult } from "../types/dreamAnalysis.js";
+import { runDreamCycle } from "./dreamExecution.js";
 
 type EtherMemoriesBaseOptions = {
   userId: string;
@@ -64,6 +70,22 @@ export class EtherMemoriesCore {
   }
 
   touch(): void { this.identity.lastActive = new Date(); }
+
+  explainMemory(id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation> {
+    return explainMemory(this.notes, this.graph, id, options);
+  }
+
+  inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport> {
+    return inspectMemoryHealth(this.notes, this.graph, options);
+  }
+
+  previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> {
+    return previewDreamCycle(this.notes, this.graph, selector, options);
+  }
+
+  runDreamCycle(plan: DreamPlan): Result<DreamCycleResult> {
+    return runDreamCycle(this.notes, this.graph, plan);
+  }
 
   addMemory(input: AddNoteInput): Result<MemoryNote> {
     const result = this.notes.add(input);

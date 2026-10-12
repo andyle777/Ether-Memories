@@ -1,6 +1,8 @@
 import type { MEMORY_CONTEXT_SCHEMA_VERSION, PORTABLE_RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 import type { DurableStorageOperations, PersistenceErrorCode } from "./persistence.js";
 export * from "./persistence.js";
+export type { DreamSelector, DreamBudgets, DreamCyclePreviewOptions, DreamPlan } from "./dreamPlan.js";
+export type { DreamCycleResult, DreamProposal, DreamProposalEvidence } from "./dreamAnalysis.js";
 
 export type MemorySource =
   | "user"
@@ -329,3 +331,5 @@ export interface PortableImportReceipt {
   imported: number;
   issues: PortableImportIssue[];
 }
+export type { MemoryInspectionOptions, InspectionCoverage, MemoryRelationshipEvidence,
+  MemoryExplanation, MemoryHealthFinding, MemoryHealthSuggestion, MemoryHealthReport } from "./memoryInspection.js";

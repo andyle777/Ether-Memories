@@ -212,11 +212,11 @@ describe("v0.5 deterministic retrieval foundation", () => {
   });
 
   it("reports LIBRARY_VERSION as the current library release", () => {
-    expect(LIBRARY_VERSION).toBe("0.6.0");
+    expect(LIBRARY_VERSION).toBe("0.7.0");
     const core = new EtherMemoriesCore({ userId: "u1" });
     const context = core.buildMemoryContext({ purpose: "debug" });
     expect(context.ok).toBe(true);
-    if (context.ok) expect(context.value.libraryVersion).toBe("0.6.0");
+    if (context.ok) expect(context.value.libraryVersion).toBe("0.7.0");
   });
 
   it("S1: diary matchedBy reports token-only matches as token, not exact_phrase", () => {

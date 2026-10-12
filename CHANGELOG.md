@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0 — Explainability, Dream Cycle & Windows Recoverability
+
+- Added bounded, detached, read-only `explainMemory` and `inspectMemoryHealth`
+  on Core and the durable facade.
+- Added deterministic Dream v1 preview and analysis through `previewDreamCycle`
+  and `runDreamCycle`: explicit bounded selection, evidence and ephemeral proposals.
+  Dreams propose. Memory remains authoritative. No LLM, embeddings, RAG, automatic
+  acceptance, canonical mutation or proposal persistence.
+- Added explicit Windows process-recoverable durability. Strict remains default;
+  recoverable covers tested application/Node-process termination with the OS and
+  local filesystem operating, not power loss or machine/kernel failure. Writer
+  locks are never auto-broken and weak acknowledgements remain process-recoverable.
+- Preserved Store v0.3, WAL/receipt/HEAD/checkpoint v1, MemoryContext/Portable
+  Record v1, Dream `ether.dream.v1`, five frozen fixtures and deterministic identity.
+- Cleaned repository/CI and secured the Node22/24 test toolchain, with isolated
+  packed-consumer gates and dedicated native Windows filesystem/termination proof.
+- Release identity advances to0.7.0; no migration or new persistence format.
+- Fixed inherited durable-runtime directory-binding: capture the absolute store
+  directory before asynchronous open so later cwd changes cannot redirect recovery,
+  writes or maintenance to another store. Added an isolated real-source regression.
+
 ## 0.6.0 — Durable Persistence
 
 - Added an opt-in durable store: `openDurableEtherMemories()` with WAL-transactional commits
