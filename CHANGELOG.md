@@ -2,6 +2,11 @@
 
 ## 0.7.0 — Explainability, Dream Cycle & Windows Recoverability
 
+Released as [GitHub v0.7.0](https://github.com/andyle777/ether-memories/releases/tag/v0.7.0)
+and published as [ether-memories@0.7.0](https://www.npmjs.com/package/ether-memories/v/0.7.0).
+See [the release manifest](RELEASE-MANIFEST.md) for frozen code-lineage,
+release-integration and published tarball identities.
+
 - Added bounded, detached, read-only `explainMemory` and `inspectMemoryHealth`
   on Core and the durable facade.
 - Added deterministic Dream v1 preview and analysis through `previewDreamCycle`
@@ -16,7 +21,7 @@
   Record v1, Dream `ether.dream.v1`, five frozen fixtures and deterministic identity.
 - Cleaned repository/CI and secured the Node22/24 test toolchain, with isolated
   packed-consumer gates and dedicated native Windows filesystem/termination proof.
-- Release identity advances to0.7.0; no migration or new persistence format.
+- Release identity advanced to0.7.0; no migration or new persistence format.
 - Fixed inherited durable-runtime directory-binding: capture the absolute store
   directory before asynchronous open so later cwd changes cannot redirect recovery,
   writes or maintenance to another store. Added an isolated real-source regression.
