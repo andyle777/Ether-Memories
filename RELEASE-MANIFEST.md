@@ -2,14 +2,25 @@
 
 Version: 0.7.0
 Tag: v0.7.0
-Lineage: released v0.6.0 → canonical T1–T5 → v0.7.0 candidate
-Status: release candidate; tag above is planned, not created; no merge or publication
-Canonical T5 parent: f4c6a94927cb9226252a55adb4ae7cca123c4a1b
 
-The reviewed exact branch-head SHA is the canonical code-lineage identity.
-It is recorded in the final freeze report and draft release PR, not embedded
-self-referentially in this manifest. Eventual merge/tag identity requires separate
-owner authorization. Prior release provenance is preserved in
+- Lineage: released v0.6.0 → canonical T1–T5 → frozen T6 → v0.7.0 release
+- Status: merged into main, tagged, released on GitHub and published on npm
+- Canonical T5 parent: `f4c6a94927cb9226252a55adb4ae7cca123c4a1b`
+- Frozen T6/code-lineage SHA: `64fb0198f70f4e3bace22e5c6f1f19eeba263676`
+- Released integration/tag SHA: `17a452ab7356092aa3b84edb1708f8a6688effa6`
+- npm publication: `ether-memories@0.7.0`; publisher `andyle777`; `latest = 0.7.0`
+- Published tarball SHA-256: `aa9d978e97d0fdbe68d7f79d9d430d91009ba5a98f09be753e32e1107f3a89e4`
+
+The reviewed frozen T6 SHA remains the canonical code-lineage identity.
+The separately authorized normal merge of [PR #31](https://github.com/andyle777/ether-memories/pull/31)
+preserved it as an ancestor of the release-integration commit; `v0.7.0` points to
+that integration commit. These are distinct identities, not interchangeable SHAs.
+The [GitHub Release](https://github.com/andyle777/ether-memories/releases/tag/v0.7.0)
+and [npm package](https://www.npmjs.com/package/ether-memories/v/0.7.0) are published.
+The registry tarball is byte-for-byte identical to the audited candidate, and a
+clean registry consumer install/import passed. This post-release documentation
+reconciliation does not alter the frozen tag or published artifact.
+Prior release provenance is preserved in
 [v0.6.0 integration lineage](docs/v0.6.0-integration.md).
 
 ## Frozen protocol identities
@@ -86,25 +97,31 @@ and [Dream analysis](docs/dream-analysis.md).
 Coverage: 1036 inherited cases + 2 release-integrity regressions + 1 durable-runtime
 directory-binding regression = 1039 active cases across41files. The regression
 checks original-store recovery and tip, write/retry, rotation/GC/maintenance,
-untouched other-store contents and cwd changes during pending open. Final actual
-results belong to the exact-SHA freeze report.
-Fresh clean Node22/24 gates require npmci, toolchain, typecheck, full tests,
+untouched other-store contents and cwd changes during pending open. The exact-SHA
+freeze evidence recorded all 1,039 tests passing, with zero failures/skips/todos
+and zero worker leaks.
+Fresh clean Node22/24 gates passed npmci, toolchain, typecheck, full tests,
 worker exit, build, npm pack, isolated packed consumer and full/production
 audit JSON with all four vulnerability totals0.
 
-All four standard Ubuntu/Windows × Node22/24 jobs must pass at the exact candidate.
-The existing Windows2025 workflow must freshly pass both Node jobs, all production/
+All four standard Ubuntu/Windows × Node22/24 jobs passed at the frozen T6 SHA.
+The existing Windows2025 workflow freshly passed both Node jobs, all production/
 integration cases, required negative controls, filesystem assertions and six
 semantic-marker termination scenarios with stable exactly-once retry convergence.
-Required native JSON identifies candidate/runtime/clean checkout and is preserved.
+Native JSON identifies the frozen SHA/runtime/clean checkout and is preserved.
+After the normal merge, all four standard CI jobs also passed at the released
+integration SHA.
 
-Generated declarations,32rootruntimeexports, blocked internals, intentional
-tarball contents, five exact fixture identities and all documentation claims
-are audited before fresh independent hostile review with no unresolved material
+Generated declarations, 32 root runtime exports, 64 blocked internal paths,
+130 intended tarball files, five exact fixture identities and all documentation claims
+were audited before fresh independent hostile review with no unresolved material
 finding. Archive-byte reproducibility across OSes is not claimed.
 
-## Excluded release actions and scope
+## Completed release actions and excluded scope
 
-Freeze does not authorize merging, tagging, npm publication or a GitHub release.
+The freeze itself did not authorize release actions. After the freeze, the owner
+separately authorized the normal merge into main, the `v0.7.0` tag, the GitHub
+Release and npm publication. Those actions are complete; the frozen code-lineage,
+released integration/tag identity and published npm artifact remain unchanged.
 No T7. Post-v0.7 work includes migrations, backup/restore, distributed writers
-and broader storage guarantees; none is part of this candidate.
+and broader storage guarantees; none is part of this release.

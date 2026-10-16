@@ -2,6 +2,16 @@
 
 Canonical project name: **Ether Memories**; package and repository: `ether-memories`.
 
+## Release status
+
+[GitHub v0.7.0](https://github.com/andyle777/ether-memories/releases/tag/v0.7.0)
+is released, and [ether-memories@0.7.0](https://www.npmjs.com/package/ether-memories/v/0.7.0)
+is published on npm.
+
+```bash
+npm install ether-memories@0.7.0
+```
+
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
 Ether Memories has three foundations:
@@ -22,7 +32,7 @@ or persists proposals. **Dreams propose. Memory remains authoritative.**
 
 Windows process recoverability is explicitly opt-in through
 `durabilityGuarantee: "recoverable"`; strict remains the default. Release identity
-advances to0.7.0 while persistence formats and Dream v1 identity remain unchanged.
+is 0.7.0; persistence formats and Dream v1 identity remain unchanged.
 
 ### Dream Plan preview
 
@@ -101,18 +111,23 @@ The durable store persists the same canonical snapshot payload; its on-disk layo
 
 ### Release verification
 
-The v0.7.0 candidate requires fresh clean Node22/24 local typecheck, full tests,
+The frozen v0.7.0 release passed fresh clean Node22/24 local typecheck, full tests,
 worker-exit, build, pack and isolated packed-consumer gates, plus full and
-production security audits with zero vulnerability totals. All four standard
+production security audits with zero vulnerability totals. The frozen evidence
+records 1,039 passing tests across 41 files, 130 intended package files,
+32 runtime exports and 64 blocked internal paths. All four standard
 Ubuntu/Windows × Node22/24 CI jobs and both dedicated Windows2025 native jobs
-must pass at its exact branch-head SHA. Native proof includes production and
+passed at the frozen T6 code-lineage SHA. Native proof includes production and
 integration cases, missing-evidence negative controls, filesystem identity checks
 and six synchronized process-termination scenarios with exactly-once retry
-convergence. The final freeze report and draft release PR record that reviewed
-SHA as canonical; a future merge/tag identity requires separate owner approval.
-See [the release manifest](RELEASE-MANIFEST.md).
+convergence. After separate owner approval, PR #31 was merged normally, preserving
+the frozen SHA as an ancestor of the release-integration commit. All four standard
+CI jobs passed on that integration commit, which the released tag identifies.
+The published npm tarball is byte-for-byte identical to the audited candidate;
+a clean registry consumer install/import passed. See [the release manifest](RELEASE-MANIFEST.md)
+for the distinct frozen code-lineage and release-integration identities.
 
-The following v0.6.0 record is historical provenance, not candidate gate evidence.
+The following v0.6.0 record is historical provenance, not v0.7.0 release-gate evidence.
 
 AF1 Tranche 10 is frozen by owner decision at code-lineage SHA
 `6f298aea2cd0278078bf49344f75807355a4e09b`. Subsequent naming and status documentation
@@ -121,7 +136,7 @@ stacked bases and `main`; see [integration lineage](docs/v0.6.0-integration.md).
 The released v0.6.0 integration SHA and tag are
 `493c7b69813e71af749e34bbf950803eb8ee589b`. The
 [GitHub Release](https://github.com/andyle777/ether-memories/releases/tag/v0.6.0)
-is published; npm publication remains a separate action.
+was published; npm publication was left as a separate action in that historical record.
 
 v0.6.0 verification (AF1 Tranches 1–10) runs:
 
