@@ -855,7 +855,7 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   async promoteCandidate(id: string, mutationId: string): Promise<Result<MemoryNote>> {
-    return this.runMutation(mutationId, { kind: "note.update", id, patch: { status: "active" } },
+    return this.runMutation(mutationId, { kind: "note.promote", id },
       effects => selectNoteEffect(effects, id));
   }
 

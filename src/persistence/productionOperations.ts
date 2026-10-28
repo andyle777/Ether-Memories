@@ -2,7 +2,7 @@ import type { EtherSnapshot } from "../types/index.js";
 import type { CommittedTip, MutationId, WalOperation } from "../types/persistence.js";
 import { join } from "node:path";
 import { STARTER_RELATIONS } from "../core/MindGraph.js";
-import { intentDigest, prepareCoreMutation, validatedCommand, type ProductionMutationCommand } from "./mutationPreparation.js";
+import { intentDigest, matchesCommittedIntent, prepareCoreMutation, validatedCommand, type ProductionMutationCommand } from "./mutationPreparation.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { ETHER_DATA_PROFILE, encodeEtherData, decodeEtherData } from "./etherData.js";
 import { referenceFor, validateReference, digestBytes, PayloadObjects, OBJECT_REFERENCE } from "./payloadObjects.js";
@@ -197,7 +197,7 @@ export class ProductionWalStore {
     const found = await this.wal.readCommittedMutation(mutationId);
     if (!found.ok) return found;
     if (found.value) {
-      if (found.value.mutation.digest !== intent.value) {
+      if (!matchesCommittedIntent(stableCommand, found.value.mutation.digest)) {
         return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
       }
       return ok(found.value);
@@ -234,7 +234,7 @@ export class ProductionWalStore {
     const found = await this.wal.readCommittedMutation(mutationId);
     if (!found.ok) return found;
     if (found.value) {
-      if (found.value.mutation.digest !== intent.value) {
+      if (!matchesCommittedIntent(stableCommand, found.value.mutation.digest)) {
         return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
       }
       const effects = await this.resolveCommittedEffects(mutationId);
@@ -245,7 +245,7 @@ export class ProductionWalStore {
     // historical cumulative receipts. An identity absent from the active WAL
     // may still be committed in reclaimed history: reconcile there before
     // preparing, with the same intent-digest semantics.
-    const historical = await this.lookupHistoricalMutation(mutationId, intent.value);
+    const historical = await this.lookupHistoricalMutation(mutationId, stableCommand);
     if (!historical.ok) return historical;
     if (historical.value) return ok(historical.value);
     const prepared = precommit(prepareCoreMutation(baseSnapshot, stableCommand));
@@ -281,7 +281,7 @@ export class ProductionWalStore {
         const relooked = await this.wal.readCommittedMutation(mutationId);
         if (!relooked.ok) return relooked;
         if (relooked.value) {
-          if (relooked.value.mutation.digest !== intent.value) {
+          if (!matchesCommittedIntent(stableCommand, relooked.value.mutation.digest)) {
             return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
           }
           const effects = await this.resolveCommittedEffects(mutationId);
@@ -382,7 +382,7 @@ export class ProductionWalStore {
    * payload-object machinery). Conflicting intent -> corruption. Absent ->
    * undefined.
    */
-  private async lookupHistoricalMutation(mutationId: MutationId, intentDigest: string): Promise<Result<MutationOutcome | undefined>> {
+  private async lookupHistoricalMutation(mutationId: MutationId, command: ProductionMutationCommand): Promise<Result<MutationOutcome | undefined>> {
     return withRecoveryAuthority(this.directory, this.io, async authority => {
       const head = authority.head;
       const ledger = await openAuthoritativeReceiptLedger(authority.directory, head.storeId, head.epochId,
@@ -394,7 +394,7 @@ export class ProductionWalStore {
       if (!found.ok) return found;
       if (!found.value) return ok(undefined);
       const entry = found.value;
-      if (entry.intentDigest !== intentDigest) {
+      if (!matchesCommittedIntent(command, entry.intentDigest)) {
         return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
       }
       const effects: SemanticOperation[] = [];
