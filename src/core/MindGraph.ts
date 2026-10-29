@@ -38,6 +38,16 @@ export class MindGraphManager {
   addEdgeWithId(id: string, source: string, target: string, relationship = "related_to", data: Record<string, unknown> = {}): Result<MindGraphEdge> {
     if (!this.graph.hasNode(source) || !this.graph.hasNode(target)) return err("NOT_FOUND", "Both graph endpoints must exist.");
     if (this.graph.hasEdge(id)) return err("CONFLICT", `Graph edge already exists: ${id}`);
+    try {
+      const normalizedData = { ...data, ...(!STARTER_RELATIONS.includes(relationship as GraphRelation) ? { rawRelation: relationship } : {}) };
+      return this.restoreEdgeWithId(id, source, target, relationship, normalizedData);
+    } catch (cause) { return err("CONFLICT", "A directed edge already exists between these graph endpoints.", cause); }
+  }
+
+  /** Reconstruct accepted historical data without inventing lost rawRelation metadata. */
+  restoreEdgeWithId(id: string, source: string, target: string, relationship = "related_to", data: Record<string, unknown> = {}): Result<MindGraphEdge> {
+    if (!this.graph.hasNode(source) || !this.graph.hasNode(target)) return err("NOT_FOUND", "Both graph endpoints must exist.");
+    if (this.graph.hasEdge(id)) return err("CONFLICT", `Graph edge already exists: ${id}`);
     const normalized = STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship : "related_to";
     try {
       this.graph.addEdgeWithKey(id, source, target, { relationship: normalized, data: cloneValue(data) });
@@ -49,14 +59,7 @@ export class MindGraphManager {
     if (!this.graph.hasNode(source) || !this.graph.hasNode(target)) {
       return err("NOT_FOUND", "Both graph endpoints must exist.");
     }
-    const normalized = STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship : "related_to";
-    const edgeId = createId("edge");
-    try {
-      this.graph.addEdgeWithKey(edgeId, source, target, { relationship: normalized, data: cloneValue({ ...data, ...(normalized !== relationship ? { rawRelation: relationship } : {}) }) });
-    } catch (cause) {
-      return err("CONFLICT", "A directed edge already exists between these graph endpoints.", cause);
-    }
-    return ok({ id: edgeId, source, target, relationship: normalized, data: cloneValue(data) });
+    return this.addEdgeWithId(createId("edge"), source, target, relationship, data);
   }
 
   getNeighbors(id: string, depth: 0 | 1 | 2 = 1, relationAllowlist?: string[], direction: "in" | "out" | "both" = "both"): { nodes: MindGraphNode[]; edges: MindGraphEdge[] } {

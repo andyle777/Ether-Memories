@@ -63,8 +63,8 @@ const objectNames = async (directory: string) => {
 const headOf = async (directory: string) => value(decodeStoreHead(Buffer.from(await fs.readFile(join(directory, "HEAD")))));
 const snapshotBytes = (runtime: DurableEtherMemories) => value(encodeSnapshotPayload(value(runtime.exportData())));
 const tipOf = (runtime: DurableEtherMemories) => value(runtime.tip);
-const note = (runtime: DurableEtherMemories, content: string, mutationId: string) =>
-  runtime.addMemory({ content, tags: ["rotation"], status: "active" }, mutationId);
+const note = (runtime: DurableEtherMemories, content: string, mutationId: string, status: "active" | "candidate" = "active") =>
+  runtime.addMemory({ content, tags: ["rotation"], status }, mutationId);
 
 describe("Tranche 7 active-WAL envelope", { timeout: 300_000 }, () => {
   it('constructive frame minimization pins the true minimum and every envelope margin', () => {
@@ -290,7 +290,9 @@ describe("Tranche 7 checkpoint rotation and reclamation", { timeout: 300_000 }, 
   it("every durable mutation kind reconciles from historical receipts after reclamation, despite later updates and deletions", async () => {
     const s = await setup();
     const runtime = value(await open(s));
-    const r1 = value(await note(runtime, "history note", "kind-note-add"));
+    // This test creates a fresh promotion. Actual v0.7 active-note promotion
+    // receipts remain covered by the unchanged released-producer fixtures.
+    const r1 = value(await note(runtime, "history note", "kind-note-add", "candidate"));
     const r2 = value(await runtime.updateMemory(r1.id, { summary: "first summary" }, "kind-note-update"));
     const r3 = value(await runtime.promoteCandidate(r1.id, "kind-note-promote"));
     const r4 = value(await runtime.addDiaryEntry({ content: "history diary", tags: ["h"] }, "kind-diary-add"));
@@ -303,7 +305,7 @@ describe("Tranche 7 checkpoint rotation and reclamation", { timeout: 300_000 }, 
     value(await runtime.rotate());
     // Retries with the original identities and inputs return the ORIGINAL
     // committed results, reconstructed from reclaimed receipt history.
-    const t1 = value(await note(runtime, "history note", "kind-note-add"));
+    const t1 = value(await note(runtime, "history note", "kind-note-add", "candidate"));
     expect(t1.id).toBe(r1.id);
     expect(t1.createdAt).toEqual(r1.createdAt);
     const t2 = value(await runtime.updateMemory(r1.id, { summary: "first summary" }, "kind-note-update"));

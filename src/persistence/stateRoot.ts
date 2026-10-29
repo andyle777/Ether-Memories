@@ -110,7 +110,7 @@ export function validateStateRoot(snapshot: EtherSnapshot): Result<StateRoot> {
     notes.replaceAll(normalizedSnapshot.memoryNotes);
     diary.replaceAll(normalizedSnapshot.diary);
     for (const node of normalizedSnapshot.graph.nodes) required(graph.addNode(node));
-    for (const edge of normalizedSnapshot.graph.edges) required(graph.addEdgeWithId(edge.id, edge.source, edge.target, edge.relationship, edge.data));
+    for (const edge of normalizedSnapshot.graph.edges) required(graph.restoreEdgeWithId(edge.id, edge.source, edge.target, edge.relationship, edge.data));
 
     // Verify that the normalized snapshot produces the same graph as what we built
     verifyGraphConsistency(normalizedSnapshot, graph);

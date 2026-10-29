@@ -112,6 +112,6 @@ export const prepareSnapshot = (raw: unknown, userId: string): Result<PreparedSn
 export const commitSnapshot = (core: any, prepared: PreparedSnapshot): void => {
   core.notes.replaceAll(prepared.notes); core.diary.replaceAll(prepared.diary); core.graph.clear();
   for (const n of prepared.nodes) core.graph.addNode(n);
-  for (const e of prepared.edges) { const r = core.graph.addEdgeWithId(e.id, e.source, e.target, e.relationship, e.data); if (!r.ok) throw new Error(r.error.message); }
+  for (const e of prepared.edges) { const r = core.graph.restoreEdgeWithId(e.id, e.source, e.target, e.relationship, e.data); if (!r.ok) throw new Error(r.error.message); }
   core.identity.createdAt = new Date(prepared.identity.createdAt); core.identity.lastActive = new Date(prepared.identity.lastActive); core.identity.displayName = prepared.identity.displayName;   core.identity.preferences = cloneValue(prepared.identity.preferences);
 };

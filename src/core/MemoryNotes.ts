@@ -106,6 +106,7 @@ export class MemoryNotes {
   promoteCandidate(id: string): Result<MemoryNote> {
     const note = this.notes.get(id);
     if (!note) return err("NOT_FOUND", `Memory note not found: ${id}`);
+    if (note.status !== "candidate") return err("CONFLICT", "Only a candidate memory can be promoted.");
     note.status = "active";
     note.updatedAt = new Date();
     this.mutationRevision++;

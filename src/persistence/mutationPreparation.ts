@@ -41,6 +41,7 @@ import { digestBytes } from "./payloadObjects.js";
 export type ProductionMutationCommand =
   | { readonly kind: "note.put"; readonly input: AddNoteInput }
   | { readonly kind: "note.update"; readonly id: string; readonly patch: UpdateNoteInput }
+  | { readonly kind: "note.promote"; readonly id: string }
   | { readonly kind: "note.remove"; readonly id: string }
   | { readonly kind: "diary.put"; readonly input: AddDiaryInput }
   | { readonly kind: "diary.update"; readonly id: string; readonly patch: Partial<Omit<DiaryEntry, "id" | "createdAt" | "updatedAt">> }
@@ -112,6 +113,20 @@ export function intentDigest(command: ProductionMutationCommand): Result<string>
   return bytes.ok ? ok(digestBytes(bytes.value)) : bytes;
 }
 
+/**
+ * Only committed-history lookup may use this legacy identity. v0.7 promotion
+ * and ordinary status-active updates were byte-identical; their originating
+ * method cannot be inferred. Fresh promotion always commits note.promote.
+ * Require the exact new command shape so extra claims cannot gain an alias.
+ */
+export function matchesCommittedIntent(command: ProductionMutationCommand, digest: string): boolean {
+  const current = intentDigest(command);
+  if (current.ok && current.value === digest) return true;
+  if (command.kind !== "note.promote" || Object.keys(command).sort().join(",") !== "id,kind") return false;
+  const legacy = intentDigest({ kind: "note.update", id: command.id, patch: { status: "active" } });
+  return legacy.ok && legacy.value === digest;
+}
+
 interface Item { readonly id: string }
 
 function diffById<T extends Item>(before: readonly T[], after: readonly T[],
@@ -150,6 +165,7 @@ function executeCommand(core: EtherMemoriesCore, command: ProductionMutationComm
   switch (command.kind) {
     case "note.put": return core.addMemory(command.input);
     case "note.update": return core.updateMemory(command.id, command.patch);
+    case "note.promote": return core.promoteCandidate(command.id);
     case "note.remove": return core.deleteMemory(command.id);
     case "diary.put": return core.addDiaryEntry(command.input);
     case "diary.update": return core.updateDiary(command.id, command.patch);
