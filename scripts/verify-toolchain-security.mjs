@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 // Offline floors for the known advisories; fresh npm audits remain freeze gates.
 const floors = new Map([
-  ["vitest", [4, 1, 11]], ["@vitest/mocker", [4, 1, 11]],
+  ["vite", [7, 3, 7]], ["vitest", [4, 1, 12]], ["@vitest/mocker", [4, 1, 12]],
   ["tinypool", [2, 1, 2]], ["source-map-js", [1, 2, 2]]
 ]);
 const lock = JSON.parse(readFileSync(process.argv[2] ?? new URL("../package-lock.json", import.meta.url), "utf8"));
@@ -19,7 +19,7 @@ for (const [path, entry] of Object.entries(lock.packages)) {
   if (first !== -1 && version[first] < floor[first]) failures.push(`${path}: version ${entry.version} is below fixed baseline ${floor.join(".")}`);
   checked.push({ path, name, version: entry.version });
 }
-for (const name of ["vitest", "@vitest/mocker"]) {
+for (const name of ["vite", "vitest", "@vitest/mocker"]) {
   if (!checked.some(entry => entry.name === name)) failures.push(`Missing required ${name} tooling entry.`);
 }
 if (failures.length) throw Error(`Known-advisory toolchain check failed:\n${failures.join("\n")}`);
