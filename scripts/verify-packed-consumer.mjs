@@ -46,6 +46,8 @@ try {
     import { join } from "node:path";
     import * as api from "ether-memories";
     import { EtherMemoriesCore, openDurableEtherMemories, createMutationId } from "ether-memories";
+    const summary = await api.summarizeWithHost({ text: "abcdef", maxChars: 3, allowHostDisclosure: false });
+    assert.deepEqual(summary, { ok: true, value: { text: "abc", source: "local" } });
     const snapshotPath = join(process.cwd(), "snapshot.json");
     const core = new EtherMemoriesCore({ userId: "packed-consumer", storagePath: snapshotPath });
     const note = core.addMemory({ content: "package consumer" });
@@ -159,7 +161,7 @@ try {
     "MemoryContextBuilder", "MemoryNotes", "MemoryRetriever", "MindGraphManager", "PORTABLE_RECORD_SCHEMA_VERSION", "RETRIEVAL_CLASS_WEIGHTS",
     "STARTER_RELATIONS", "STORE_SCHEMA_VERSION", "createMutationId", "err", "getDurableOperations", "hydrateDate", "ok",
     "openDurableEtherMemories", "parseTransactionSequenceId", "preflightPortableRecords", "preparePortableImport", "sameCommittedTip",
-    "toAgentToolResult", "toPlainJson", "toPortableRecords", "toRlmEnv"], "T4 must preserve the frozen 32 runtime exports.");
+    "summarizeWithHost", "toAgentToolResult", "toPlainJson", "toPortableRecords", "toRlmEnv"], "T1 must preserve the frozen 33 runtime exports.");
   await fs.writeFile(join(work, "consumer.mts"), `
     import { EtherMemoriesCore, openDurableEtherMemories, createMutationId, type DurableEtherMemories, type DurableEtherMemoriesOptions,
       type MemoryExplanation, type MemoryHealthReport, type MemoryInspectionOptions,
@@ -167,6 +169,11 @@ try {
       type DreamCycleResult, type DreamProposal, type DreamProposalEvidence,
       type InspectionCoverage, type MemoryRelationshipEvidence, type MemoryHealthFinding,
       type MemoryHealthSuggestion, type Result } from "ether-memories";
+    import { summarizeWithHost, type HostCapabilities, type HostSummaryRequest, type HostSummaryResult } from "ether-memories";
+    const summaryRequest: HostSummaryRequest = { text: "example", maxChars: 3, allowHostDisclosure: true };
+    const capabilities: HostCapabilities = { summarize: async ({ text, maxChars }) => text.slice(0, maxChars) };
+    const summary: Result<HostSummaryResult> = await summarizeWithHost(summaryRequest, capabilities);
+    if (summary.ok) { const source: "host" | "local" = summary.value.source; }
     const core = new EtherMemoriesCore({ userId: "types" });
     core.addMemory({ content: "typed consumer" });
     const inspect: MemoryInspectionOptions = { asOf: 1893456000000 };

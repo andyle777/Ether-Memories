@@ -16,6 +16,7 @@ export * from "./core/FoundationLinker.js";
 export * from "./core/CondensationEngine.js";
 export * from "./adapters/json.js";
 export * from "./adapters/agentTool.js";
+export * from "./adapters/hostCapabilities.js";
 export * from "./adapters/rlmEnv.js";
 export * from "./adapters/portable.js";
 export * from "./adapters/portableImport.js";
