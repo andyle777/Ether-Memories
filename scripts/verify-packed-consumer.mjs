@@ -48,6 +48,8 @@ try {
     import { EtherMemoriesCore, openDurableEtherMemories, createMutationId } from "ether-memories";
     const summary = await api.summarizeWithHost({ text: "abcdef", maxChars: 3, allowHostDisclosure: false });
     assert.deepEqual(summary, { ok: true, value: { text: "abc", source: "local" } });
+    const adaptive = await api.summarizeAdaptive({ operation: "local_excerpt", text: "abcdef", maxChars: 3 });
+    assert.equal(adaptive.ok, true); assert.equal(adaptive.value.text, "abc"); assert.equal(adaptive.value.route, "local-deterministic");
     const snapshotPath = join(process.cwd(), "snapshot.json");
     const core = new EtherMemoriesCore({ userId: "packed-consumer", storagePath: snapshotPath });
     const note = core.addMemory({ content: "package consumer" });
@@ -161,7 +163,7 @@ try {
     "MemoryContextBuilder", "MemoryNotes", "MemoryRetriever", "MindGraphManager", "PORTABLE_RECORD_SCHEMA_VERSION", "RETRIEVAL_CLASS_WEIGHTS",
     "STARTER_RELATIONS", "STORE_SCHEMA_VERSION", "createMutationId", "err", "getDurableOperations", "hydrateDate", "ok",
     "openDurableEtherMemories", "parseTransactionSequenceId", "preflightPortableRecords", "preparePortableImport", "sameCommittedTip",
-    "summarizeWithHost", "toAgentToolResult", "toPlainJson", "toPortableRecords", "toRlmEnv"], "T1 must preserve the frozen 33 runtime exports.");
+    "summarizeAdaptive", "summarizeWithHost", "toAgentToolResult", "toPlainJson", "toPortableRecords", "toRlmEnv"], "T2 must preserve the frozen 34 runtime exports.");
   await fs.writeFile(join(work, "consumer.mts"), `
     import { EtherMemoriesCore, openDurableEtherMemories, createMutationId, type DurableEtherMemories, type DurableEtherMemoriesOptions,
       type MemoryExplanation, type MemoryHealthReport, type MemoryInspectionOptions,
@@ -170,6 +172,10 @@ try {
       type InspectionCoverage, type MemoryRelationshipEvidence, type MemoryHealthFinding,
       type MemoryHealthSuggestion, type Result } from "ether-memories";
     import { summarizeWithHost, type HostCapabilities, type HostSummaryRequest, type HostSummaryResult } from "ether-memories";
+    import { summarizeAdaptive, type AdaptiveSummaryRequest, type AdaptiveSummary, type AdaptiveDependencies, type AdaptiveCapabilities, type AdaptiveEvidenceTrace, type EvidenceLookup, type EvidenceResolver, type AdaptiveOperation, type AdaptiveRoute, type AdaptiveResultKind, type AdaptiveReason } from "ether-memories";
+    const adaptiveRequest: AdaptiveSummaryRequest = { operation: "local_excerpt", text: "example", maxChars: 3 };
+    const adaptiveResult: Result<AdaptiveSummary> = await summarizeAdaptive(adaptiveRequest);
+    if (adaptiveResult.ok) { const route: AdaptiveRoute = adaptiveResult.value.route; }
     const summaryRequest: HostSummaryRequest = { text: "example", maxChars: 3, allowHostDisclosure: true };
     const capabilities: HostCapabilities = { summarize: async ({ text, maxChars }) => text.slice(0, maxChars) };
     const summary: Result<HostSummaryResult> = await summarizeWithHost(summaryRequest, capabilities);
