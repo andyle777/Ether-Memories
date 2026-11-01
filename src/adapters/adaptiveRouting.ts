@@ -1,3 +1,4 @@
+import { types as utilTypes } from "node:util";
 import type { ContextCitation } from "../types/index.js";
 import { err, ok, type Result } from "../utils/result.js";
 
@@ -95,6 +96,8 @@ export async function summarizeAdaptive(request: AdaptiveSummaryRequest, deps?: 
       let content: string;
       try {
         const outcome: unknown = Reflect.apply(resolver, undefined, [citation.kind, citation.id]);
+        // Resolver results are synchronous; the trusted resolver owns any asynchronous work.
+        if (utilTypes.isPromise(outcome)) return storage();
         if (!isObject(outcome)) return storage();
         const status = own(outcome, "status");
         if (!data(status)) return storage();

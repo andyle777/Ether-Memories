@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
 import * as api from "../src/index.js";
 
 // Keep these tests executable against the pre-T2 root export. An absent export
@@ -18,6 +21,81 @@ const invalid = expect.objectContaining({ ok: false, error: expect.objectContain
 const trace = { providedToHost: [], excerptSources: [] };
 
 describe("T2 adaptive contract", () => {
+  it("K12C: rejects native promises without invoking their species getter", async () => {
+    const species = vi.fn(() => { throw Error("PRIVATE_SPECIES_SENTINEL"); });
+    const outcome = Promise.resolve({ status: "found", content: "invalid" });
+    Object.defineProperty(outcome, "constructor", { value: Object.defineProperty({}, Symbol.species, { get: species }) });
+    const host = vi.fn();
+    const result = await adaptive()({ ...hybrid, references: [note], allowHostDisclosure: true, allowDegradedFallback: true }, { evidence: () => outcome, host: { summarizeEvidence: host } });
+    expect(result).toMatchObject({ ok: false, error: { code: "STORAGE_ERROR", message: "Evidence lookup failed." } });
+    expect(species).not.toHaveBeenCalled(); expect(host).not.toHaveBeenCalled();
+  });
+  // Out-of-contract diagnostic: ETHER_RUN_K12B_DIAGNOSTIC=1 reproduces the original RED.
+  it.skipIf(process.env.ETHER_RUN_K12B_DIAGNOSTIC !== "1")("K12B: contains a rejected resolver promise with a poisoned constructor", () => {
+    const compile = (path: string) => ts.transpileModule(readFileSync(new URL(path, import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+    const resultUrl = `data:text/javascript;base64,${Buffer.from(compile("../src/utils/result.ts")).toString("base64")}`;
+    const adapter = compile("../src/adapters/adaptiveRouting.ts").replace('"../utils/result.js"', JSON.stringify(resultUrl));
+    expect(adapter).not.toContain('"../utils/result.js"');
+    const adapterUrl = `data:text/javascript;base64,${Buffer.from(adapter).toString("base64")}`;
+    const script = `
+      import { summarizeAdaptive } from ${JSON.stringify(adapterUrl)};
+      const rejected = Promise.reject(new Error("PRIVATE_REJECTION_SENTINEL"));
+      Object.defineProperty(rejected, "constructor", { get() { throw new Error("PRIVATE_CONSTRUCTOR_SENTINEL"); } });
+      let calls = 0;
+      const result = await summarizeAdaptive({ operation: "semantic_summary", references: [{ ref: "note:n1", kind: "note", id: "n1" }], maxChars: 3, allowHostDisclosure: true, allowDegradedFallback: true }, { evidence: () => rejected, host: { summarizeEvidence: () => { calls++; return Promise.resolve("bad"); } } });
+      console.log(JSON.stringify({ result, calls }));
+      await new Promise(resolve => setTimeout(resolve, 25));
+    `;
+    const child = spawnSync(process.execPath, ["--unhandled-rejections=strict", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+    expect(child.error).toBeUndefined();
+    expect(JSON.parse(child.stdout.trim())).toEqual({ result: { ok: false, error: { code: "STORAGE_ERROR", message: "Evidence lookup failed." } }, calls: 0 });
+    expect(child.stdout).not.toContain("PRIVATE_REJECTION_SENTINEL");
+    expect(child.stdout).not.toContain("PRIVATE_CONSTRUCTOR_SENTINEL");
+    expect(child.stderr.includes("PRIVATE_REJECTION_SENTINEL"), "private rejection appeared in stderr").toBe(false);
+    expect(child.stderr.includes("PRIVATE_CONSTRUCTOR_SENTINEL"), "private constructor appeared in stderr").toBe(false);
+    expect(child.status, child.stderr.slice(0, 500)).toBe(0);
+  }, 20000);
+  it("K12: rejects resolver-handled promises in a strict Node process", () => {
+    const compile = (path: string) => ts.transpileModule(readFileSync(new URL(path, import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+    const resultUrl = `data:text/javascript;base64,${Buffer.from(compile("../src/utils/result.ts")).toString("base64")}`;
+    const adapter = compile("../src/adapters/adaptiveRouting.ts").replace('"../utils/result.js"', JSON.stringify(resultUrl));
+    expect(adapter).not.toContain('"../utils/result.js"');
+    const adapterUrl = `data:text/javascript;base64,${Buffer.from(adapter).toString("base64")}`;
+    const script = `
+      import { summarizeAdaptive } from ${JSON.stringify(adapterUrl)};
+      import { runInNewContext } from "node:vm";
+      let calls = 0;
+      const request = { operation: "semantic_summary", references: [{ ref: "note:n1", kind: "note", id: "n1" }], maxChars: 3, allowHostDisclosure: true, allowDegradedFallback: true };
+      for (const evidence of [() => { const p = Promise.reject(new Error("PRIVATE_RESOLVER_REJECTION_SENTINEL")); void p.catch(() => {}); return p; }, () => runInNewContext('(() => { const p = Promise.reject(new Error("PRIVATE_RESOLVER_REJECTION_SENTINEL")); p.catch(() => {}); return p; })()')]) {
+        const result = await summarizeAdaptive(request, { evidence, host: { summarizeEvidence: () => { calls++; return Promise.resolve("bad"); } } });
+        console.log(JSON.stringify({ result, calls }));
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    `;
+    const child = spawnSync(process.execPath, ["--unhandled-rejections=strict", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr.slice(0, 500)).toBe(0);
+    expect(child.stderr).not.toContain("PRIVATE_RESOLVER_REJECTION_SENTINEL");
+    const lines = child.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+    expect(lines).toHaveLength(2);
+    for (const line of lines) expect(line).toEqual({ result: { ok: false, error: { code: "STORAGE_ERROR", message: "Evidence lookup failed." } }, calls: 0 });
+    expect(child.stdout).not.toContain("PRIVATE_RESOLVER_REJECTION_SENTINEL");
+  }, 20000);
+  it("K12: rejects fulfilled promises even when decorated as valid evidence", async () => {
+    const outcome = Object.assign(Promise.resolve({ status: "found", content: "eventual" }), { status: "found", content: "forged" });
+    const host = vi.fn();
+    const result = await adaptive()({ ...hybrid, references: [note], allowHostDisclosure: true, allowDegradedFallback: true }, { evidence: () => outcome, host: { summarizeEvidence: host } });
+    expect(result).toMatchObject({ ok: false, error: { code: "STORAGE_ERROR", message: "Evidence lookup failed." } });
+    expect(host).not.toHaveBeenCalled();
+  });
+  it("K12: rejects a malformed thenable without invoking its getter", async () => {
+    const getter = vi.fn(() => { throw Error("PRIVATE_THENABLE_SENTINEL"); });
+    const outcome = Object.defineProperty({}, "then", { get: getter });
+    const host = vi.fn();
+    const result = await adaptive()({ ...hybrid, references: [note], allowHostDisclosure: true, allowDegradedFallback: true }, { evidence: () => outcome, host: { summarizeEvidence: host } });
+    expect(result).toMatchObject({ ok: false, error: { code: "STORAGE_ERROR", message: "Evidence lookup failed." } });
+    expect(getter).not.toHaveBeenCalled(); expect(host).not.toHaveBeenCalled();
+  });
   it("T2-001/025/065: direct excerpt does not inspect dependencies", async () => {
     expect(await adaptive()({ operation: "local_excerpt", text: "abcdef", maxChars: 3 }, noDependencies)).toEqual({ ok: true, value: { operation: "local_excerpt", plannedRoute: "local-deterministic", route: "local-deterministic", kind: "local_excerpt", text: "abc", textOrigin: "local", degraded: false, evidence: trace, hostMayStillBeProcessing: false } });
   });
