@@ -268,11 +268,16 @@ function Add-PhaseAStage3Evidence($VerdictInput,$Evidence,[string]$EvidenceClass
     if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $Evidence -isnot [hashtable] -or $Evidence.cleanupVerified -isnot [bool]) { return }
     Add-PhaseAAclEstablishmentEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
     Add-PhaseAProtectedInventoryEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
-    if ($Evidence.cleanupVerified -and $Evidence.ContainsKey('aclInspection')) {
-      $acl=$Evidence.aclInspection
-      if ($acl -is [hashtable] -and $acl.protected -is [bool] -and $acl.protected -and $acl.expected -is [string] -and $acl.expected.Length -gt 0 -and $acl.expected -ceq $acl.actual -and $VerdictInput.cases.aclInspection.state -ceq 'NOT_RUN') {
-        $sha=[Security.Cryptography.SHA256]::Create();try {$json=ConvertTo-Json -Compress -InputObject ([ordered]@{control='aclInspection';expected=$acl.expected;actual=$acl.actual;protected=$acl.protected;cleanup=$true});$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-        $VerdictInput.cases.aclInspection=@{state='PASS';evidence=$EvidenceClass;reason='NONE';proof=$hash}
+    # Recompute establishment independently; a preexisting verdict entry is not proof.
+    $aclProof=New-PhaseAManagerVerdictInput $VerdictInput.commit $VerdictInput.runId
+    Add-PhaseAAclEstablishmentEvidence $aclProof $Evidence $EvidenceClass $ActorJournal
+    $est=$aclProof.cases.aclEstablishment
+    if ($VerdictInput.cases.aclInspection.state -ceq 'NOT_RUN' -and $est.state -cin @('PASS','FAIL') -and $Evidence.ContainsKey('aclEstablishment') -and $Evidence.ContainsKey('aclCorroboration')) {
+      $operations=@($Evidence.aclEstablishment | ForEach-Object {$_});$checks=@($Evidence.aclCorroboration | ForEach-Object {$_})
+      if ($operations.Count -ge 2 -and $checks.Count -ge 2 -and $operations[1].role -ceq 'protected' -and $checks[1].role -ceq 'protected' -and ($est.state -ceq 'PASS' -or ($est.state -ceq 'FAIL' -and $operations.Count -eq 2 -and $operations[1].reason -ceq 'DESCRIPTOR_MISMATCH'))) {
+        $payload=[ordered]@{control='aclInspection';target='protected';sequence=1;establishmentProof=$est.proof;state=$est.state}
+        $sha=[Security.Cryptography.SHA256]::Create();try {$json=ConvertTo-Json -Compress -InputObject $payload;$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $VerdictInput.cases.aclInspection=@{state=$est.state;evidence=$EvidenceClass;reason=$est.reason;proof=$hash}
       }
     }
     $probes=@($ActorJournal | Where-Object { $_.role -ceq 'legacy' -and $_.operation -ceq 'probe' })

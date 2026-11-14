@@ -440,7 +440,7 @@ $allowed=$journal[8].observation.Clone();$allowed.errorCategory='NONE';$allowed.
 $entry=@{control='unauthorizedWrite';operation='Overwrite';target='protectedFile';accountSid='S-1-5-21-2';tokenSid='S-1-5-21-2';beforeExists=$true;parentExists=$true;beforeInventory=('b'*64);beforeDigest=('a'*64);afterExists=$true;afterInventory=('c'*64);observation=$allowed}
 $fs=@{cleanupVerified=$true;aclInspection=@{expected='D:P(A;;FA;;;SY)';actual='D:P(A;;FA;;;SY)';protected=$true};unauthorizedWrite=$entry}
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fs 'SIMULATED_PASS' $journal.ToArray()
-if($v.cases.aclInspection.state -cne 'PASS' -or $v.cases.unauthorizedWrite.state -cne 'FAIL' -or $v.cases.unauthorizedWrite.reason -cne 'VIOLATION'){throw 'Stage 3 verified outcomes not mapped'}
+if($v.cases.aclInspection.state -cne 'NOT_RUN' -or $v.cases.unauthorizedWrite.state -cne 'FAIL' -or $v.cases.unauthorizedWrite.reason -cne 'VIOLATION'){throw 'Stage 3 verified outcomes not mapped'}
 $denied=$entry.Clone();$denied.control='unauthorizedRead';$denied.operation='Read';$denied.observation=$journal[5].observation.Clone();$denied.observation.errorCategory='ACCESS_DENIED'
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v @{cleanupVerified=$true;unauthorizedRead=$denied} 'SIMULATED_PASS' $journal.ToArray()
 if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'Uncorroborated denial promoted'}

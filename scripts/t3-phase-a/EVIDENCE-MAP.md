@@ -27,7 +27,7 @@ on trusted run provenance and owner authorization for a final verdict.
 | alternateTimeout | Hosted supervisor tests timeout; independent per-control proof is not retained. | Missing |
 | ntfsVolume | Stage 3 setup checks volume type; independent proof is not retained. | Missing |
 | aclEstablishment | Stage 3 retains each ACL operation and a separate manager descriptor reread; the adapter rechecks fixture, actor identity and expected DACL. Application/read failures remain unverified, and hosted enforcement is not established. | Connected |
-| aclInspection | Manager reads and rechecks the fixture ACL; failure proof remains incomplete. | Partial |
+| aclInspection | The protected-directory producer reread and separate manager observation are bound to fixture, actor identities and the recomputed establishment policy; corroborated protected-descriptor mismatches are retained. | Connected |
 | authorizedRead | Stage 3 executes actor read; file identity and independent content proof are not retained. | Missing |
 | authorizedCreate | Stage 3 executes actor create; independent target/inventory proof is not retained. | Missing |
 | authorizedReadback | Stage 3 checks actor readback; independent content proof is not retained. | Missing |
