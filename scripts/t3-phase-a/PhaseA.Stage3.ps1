@@ -59,10 +59,10 @@ function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBa
     try { $entry.afterExists=& $FixtureBackend.Exists $Target; $entry.afterInventory=& $FixtureBackend.Inventory $Fixture; if($FixtureBackend.ContainsKey('InventoryDetailed')){$entry['afterDetails']=Get-PhaseAInventorySnapshot $FixtureBackend $Fixture $Account $Control 'AFTER'} } catch { $entry['afterDetails']=@{status='ERROR';reason='COLLECTION_FAILED';control=$Control;phase='AFTER'} }
   }
 }
-function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hashtable]$ActorBackend) {
+function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hashtable]$ActorBackend,[hashtable]$EvidenceSink=@{}) {
   $cases=@{acl=$false;authorizedRead=$false;authorizedCreate=$false;authorizedReadback=$false;
     unauthorizedRead=$false;unauthorizedWrite=$false;unauthorizedCreate=$false;proposedDelete=$false;proposedRename=$false;inventory=$false;insecureRejected=$false;fixtureCleanup=$false}
-  $evidence=@{cleanupVerified=$false}; $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false
+  $evidence=@{cleanupVerified=$false}; $EvidenceSink['evidence']=$evidence; $EvidenceSink['cases']=$cases; $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false
   try {
     $fixture=& $FixtureBackend.Setup $Accounts
     if ($null -eq $fixture -or ($fixture.aclInspected -isnot [bool] -or -not $fixture.aclInspected)) { throw 'STAGE3_ACL_REJECTED' }

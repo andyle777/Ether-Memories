@@ -51,7 +51,7 @@ function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashta
         if ($control.status -cne 'LIVE_OBSERVED') { $state.reason='SUPERVISOR_LIVE_FAILED'; throw 'hosted supervisor controls failed' }
       }
       if ($state.filesystem) {
-        $experiment=Invoke-PhaseAStage3 $accounts $tokens $state.fixture $state.backend
+        $experiment=Invoke-PhaseAStage3 $accounts $tokens $state.fixture $state.backend $state.result
         $state.reason=$experiment.status
         $state.result['cases']=$experiment.cases
         $state.result['evidence']=$experiment.evidence

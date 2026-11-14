@@ -1,4 +1,5 @@
 . "$PSScriptRoot/PhaseA.Tests.ps1"
+. "$PSScriptRoot/PhaseA.Accounts.ps1"
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
 $root=Join-Path ([IO.Path]::GetTempPath()) ('ether-inventory-test-'+[Guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($root)|Out-Null;$f=Join-Path $root 'original.bin';$f2=Join-Path $root 'committed.bin';[IO.File]::WriteAllText($f,'ether-phase-a-synthetic');[IO.File]::WriteAllText($f2,'A')
 try {
@@ -41,5 +42,18 @@ try {
  if($stage.status -cne 'STAGE3_COMPLETE' -or $managerVerdict.cases.protectedInventory.state -cne 'PASS'){Write-Output ('DEBUG stage='+$stage.status+' verdict='+$managerVerdict.cases.protectedInventory.state+' events='+$events.Count+' keys='+($stage.evidence.Keys -join ','));throw 'manager inventory bridge failed'}
  $fakeState.created=$false;$broken=$backend.Clone();$broken.Inventory={param($f) throw 'synthetic-private-path'};$failedStage=Invoke-PhaseAStage3 $accounts $tokens $broken $fakeActors
  if($failedStage.evidence.inventoryBaseline.status -cne 'ERROR' -or $failedStage.evidence.inventoryBaseline.reason -cne 'COLLECTION_FAILED' -or ($failedStage.evidence.inventoryBaseline | Out-String) -match 'private-path'){throw 'collection failure not retained safely'}
- Write-Output 'PASS protected inventory evidence, manager path and nineteen negative controls'
+ $fakeState.created=$false;$fakeState.mutated=$false;$script:sequence=0;$script:cleanupEvents=New-Object 'System.Collections.Generic.List[string]'
+ $accountBackend=@{Create={param($role) $script:sequence++;@{role=$role;sid="S-1-5-21-$script:sequence"}};Authenticate={param($a) @{sid=$a.sid;primary=$true;admin=$false;elevated=$false;standard=$true}};Close={param($t) $script:cleanupEvents.Add('token')};Remove={param($a) $script:cleanupEvents.Add('account')}}
+ $failingFixture=$backend.Clone();$failingFixture.Inventory={param($f) if($fakeState.mutated){$changed.digest}else{$detail.digest}}.GetNewClosure();$failingFixture.InventoryDetailed={param($f) if($fakeState.mutated){$changed}else{$detail}}.GetNewClosure();$failingFixture.Cleanup={param($f) $script:cleanupEvents.Add('fixture')}
+ $originalRun=$fakeActors.Run;$failingActors=@{Run={param($a,$t,$op,$target) if($a.role -ceq 'legacy' -and $op -ceq 'Overwrite'){throw 'STAGE2_CHILD_UNCONFIRMED'};$r=& $originalRun $a $t $op $target;if($a.role -ceq 'legacy' -and $op -ceq 'Read' -and $target -ceq $fakeFixture.protectedFile){$fakeState.mutated=$true};return $r}.GetNewClosure()}
+ $journal2=New-Object 'System.Collections.Generic.List[object]';$wrapped2=New-PhaseAActorJournalBackend $failingActors $journal2;$sink=@{}
+ $status=Invoke-PhaseAStages $true $true $accountBackend $wrapped2 $true $failingFixture $sink
+ if($status -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:cleanupEvents.Count -ne 0 -or -not $sink.ContainsKey('evidence')){throw 'unconfirmed child lost the retained stage evidence or cleaned dependencies'}
+ $failedVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $failedVerdict $sink.evidence 'SIMULATED_PASS' $journal2.ToArray()
+ if($failedVerdict.cases.protectedInventory.state -cne 'FAIL'){throw 'prior inventory violation lost after unconfirmed child'}
+ if($sink.evidence.cleanupVerified -ne $false){throw 'unconfirmed child cleanup was reported successful'}
+ $failureCheck=New-PhaseAEvidenceVerifier $journal2.ToArray() $failedVerdict '1' $true $true 'SIMULATED_PASS' @() @{} $sink.evidence
+ if(-not (& $failureCheck 'protectedInventory' $failedVerdict.cases.protectedInventory $failedVerdict)){throw 'retained violation failed independent proof recheck'}
+ if((Get-PhaseAVerdict $failedVerdict $failureCheck).status -cne 'UNVERIFIED'){throw 'unconfirmed cleanup or simulated evidence produced a final verdict'}
+ Write-Output 'PASS protected inventory evidence, manager path and twenty negative controls'
 } finally {[IO.File]::Delete($f);[IO.File]::Delete($f2);[IO.Directory]::Delete($root,$false)}
