@@ -34,7 +34,7 @@ on trusted run provenance and owner authorization for a final verdict.
 | unauthorizedRead | Actor report plus separate trusted read-open, positive controls, ACL and inventory; direct proof of actor request remains unresolved. | Partial |
 | unauthorizedWrite | Actor report plus separate trusted write-open, positive controls, ACL and content inventory; direct proof of actor request remains unresolved. | Partial |
 | unauthorizedCreate | Actor report plus separate trusted create, positive controls, ACL and inventory; direct proof of actor request remains unresolved. | Partial |
-| protectedInventory | Stage 3 compares inventory; independently checkable before/after records are not retained. | Missing |
+| protectedInventory | The manager captures bounded detailed baseline and before/after snapshots for each unauthorized operation; the verifier recomputes the legacy digest, checks fixture and actor-journal binding, and retains verified mutations. | Connected |
 | insecureAclControl | Stage 3 checks an intentionally permissive fixture; independent ACL and operation proofs are not retained. | Missing |
 | processCleanup | Launcher and supervisor close jobs and handles; complete independent cleanup proof is not retained. | Missing |
 | fixtureCleanup | Stage 3 removes fixture; independent absence proof is not retained. | Missing |
@@ -116,3 +116,17 @@ Stage 3 has no route to the legacy impersonating thread helper. That source is
 loaded only for the offline legacy regression. Results remain separate from the
 actor report, and an access-open is not proof of an overwrite. Hosted
 cross-identity enforcement remains unverified.
+
+
+Protected inventory evidence is bound to the random fixture root and to the
+manager-observed broker and legacy process journal. The baseline is collected
+after the authorized create/readback and must contain the expected synthetic
+original and committed files. Each of the five unauthorized actor operations
+has independently collected BEFORE and AFTER snapshots. The verifier rebuilds
+the legacy digest from bounded, canonical entries and checks operation order,
+identity and cleanup dependencies. A verified state change is preserved as a
+violation even if later collection or cleanup fails. Digest reconstruction is
+internal consistency checking, not a new Windows observation. Collection is
+not race-free: an entry can change between inspection and opening. Reparse
+points are rejected, but this does not eliminate time-of-check/time-of-use
+races. Hosted cross-identity enforcement remains unverified.

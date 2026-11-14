@@ -21,18 +21,34 @@ function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Tok
     $result=@{status='OBSERVED';reason='NONE';evidence=$EvidenceClass;sid=$raw.sid;operation=$Operation;target=$TargetId;outcome=$outcome;nativeError=$raw.error;handlesClosed=$raw.handlesClosed}; if($processEvidence){$result.execution='PROCESS';$result.processVerified=$raw.processVerified;$result.terminated=$raw.terminated;$result.pid=$raw.pid;$result.createdAt=$raw.createdAt;$result.pipeClientPid=$raw.pipeClientPid;$result.nonce=$raw.nonce}else{$result.reverted=$raw.reverted};return $result
   } catch { $code=$_.Exception.GetBaseException().Message; if ($code -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; if($code -cin @('WITNESS_TIMEOUT','WITNESS_CLEANUP_FAILED')) {return @{status='UNVERIFIED';reason=$code;evidence=$EvidenceClass}}; return $failure }
 }
+function Get-PhaseAInventorySnapshot($Backend,$Fixture,$Account,[string]$Control,[string]$Phase) {
+  $positions=@{unauthorizedRead=0;unauthorizedWrite=1;unauthorizedCreate=2;unauthorizedRename=3;unauthorizedDelete=4}
+  $failed=@{status='ERROR';reason='COLLECTION_FAILED';control=$Control;phase=$Phase}
+  try {
+    if(-not $positions.ContainsKey($Control) -or $Phase -cnotin @('BEFORE','AFTER') -or $Fixture -isnot [hashtable] -or -not $Fixture.ContainsKey('root') -or -not $Fixture.ContainsKey('protectedDir') -or $Account.sid -isnot [string]){return $failed}
+    $root=[IO.Path]::GetFullPath($Fixture.root);$parent=[IO.Path]::GetFullPath($Fixture.parent).TrimEnd('\');$fixtureId=[IO.Path]::GetFileName($root)
+    if($fixtureId -cnotmatch '^ether-phase-a-store-[0-9a-f]{32}$' -or -not $root.StartsWith($parent+'\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFullPath($Fixture.protectedDir) -cne [IO.Path]::Combine($root,'protected')){return $failed}
+    $source=if($Backend.ContainsKey('WitnessEvidence') -and $Backend.WitnessEvidence -ceq 'LIVE'){'LIVE'}else{'INJECTED'}
+    if($source -ceq 'LIVE') {foreach($path in @($root,$Fixture.protectedDir)){if(-not [IO.Directory]::Exists($path) -or (((Get-Item -LiteralPath $path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){return $failed}}}
+    $snapshot=& $Backend.InventoryDetailed $Fixture
+    if($snapshot -isnot [hashtable] -or $snapshot.digest -cnotmatch '^[0-9a-f]{64}$' -or (Get-PhaseAInventoryEntriesDigest $snapshot.entries) -cne $snapshot.digest){return $failed}
+    if($source -ceq 'LIVE' -and $parent -cne [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)).TrimEnd('\')){return $failed}
+    return @{status='OBSERVED';reason='NONE';source=$source;rootIdentity=$root;fixtureId=$fixtureId;control=$Control;position=$positions[$Control];phase=$Phase;actorSid=$Account.sid;digest=$snapshot.digest;entries=$snapshot.entries}
+  } catch {return $failed}
+}
 function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBackend,[hashtable]$FixtureBackend,$Fixture,[hashtable]$Journal,[string]$Control,[string]$Operation,[string]$Target,[string]$TargetId) {
   $entry=@{control=$Control;operation=$Operation;target=$TargetId;accountSid=$Account.sid;tokenSid=$Token.sid;beforeExists=$null;parentExists=$null;beforeInventory=$null;beforeDigest=$null;afterExists=$null;afterInventory=$null;observation=$null;witness=$null}
   $Journal[$Control]=$entry
   $entry.beforeExists=& $FixtureBackend.Exists $Target
   if ($FixtureBackend.ContainsKey('DirectoryExists') -and $Fixture.ContainsKey('protectedDir')) { $entry.parentExists=& $FixtureBackend.DirectoryExists $Fixture.protectedDir }
-  $entry.beforeInventory=& $FixtureBackend.Inventory $Fixture
+  try { $entry.beforeInventory=& $FixtureBackend.Inventory $Fixture } catch { $entry['beforeDetails']=@{status='ERROR';reason='COLLECTION_FAILED';control=$Control;phase='BEFORE'}; throw 'INVENTORY_COLLECTION_FAILED' }
+  if($FixtureBackend.ContainsKey('InventoryDetailed')){$entry['beforeDetails']=Get-PhaseAInventorySnapshot $FixtureBackend $Fixture $Account $Control 'BEFORE'}
   if ($Operation -ceq 'Read' -and $entry.beforeExists -ceq $true) { $entry.beforeDigest=& $FixtureBackend.Digest $Target }
   $original=$ActorBackend.Run
   $capture={param($a,$t,$op,$path) $value=& $original $a $t $op $path; if($value -is [hashtable]){$entry.observation=$value}; return $value}.GetNewClosure()
   try {
     $value=Invoke-PhaseAActorOperation $Account $Token @{Run=$capture} $Operation $Target 'denied'
-    if ($FixtureBackend.ContainsKey('Probe')) {
+    if ($Operation -cin @('Read','Overwrite','Create') -and $FixtureBackend.ContainsKey('Probe')) {
       $class=if ($FixtureBackend.ContainsKey('WitnessEvidence') -and $FixtureBackend.WitnessEvidence -ceq 'LIVE') {'LIVE'} else {'INJECTED'}
       $entry.witness=Invoke-PhaseATrustedAccess $FixtureBackend $Fixture $Token $Account.sid $Operation $TargetId $class
       if ($entry.witness.status -cne 'OBSERVED' -or $entry.witness.outcome -cne 'ACCESS_DENIED') { throw 'STAGE3_WITNESS_UNVERIFIED' }
@@ -40,7 +56,7 @@ function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBa
     return $value
   }
   finally {
-    try { $entry.afterExists=& $FixtureBackend.Exists $Target; $entry.afterInventory=& $FixtureBackend.Inventory $Fixture } catch { }
+    try { $entry.afterExists=& $FixtureBackend.Exists $Target; $entry.afterInventory=& $FixtureBackend.Inventory $Fixture; if($FixtureBackend.ContainsKey('InventoryDetailed')){$entry['afterDetails']=Get-PhaseAInventorySnapshot $FixtureBackend $Fixture $Account $Control 'AFTER'} } catch { $entry['afterDetails']=@{status='ERROR';reason='COLLECTION_FAILED';control=$Control;phase='AFTER'} }
   }
 }
 function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hashtable]$ActorBackend) {
@@ -78,7 +94,8 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
     $cases.authorizedCreate=$true
     $readback=Invoke-PhaseAActorOperation $Accounts[0] $Tokens[0] $ActorBackend 'Read' $fixture.newFile 'allowed'
     if ($readback.digest -cne $fixture.writeDigest) { throw 'authorized readback mismatch' }; $cases.authorizedReadback=$true
-    $before=& $FixtureBackend.Inventory $fixture
+    try { $before=& $FixtureBackend.Inventory $fixture } catch { $evidence['inventoryBaseline']=@{status='ERROR';reason='COLLECTION_FAILED';control='unauthorizedRead';phase='BEFORE'}; throw 'INVENTORY_COLLECTION_FAILED' }
+    if($FixtureBackend.ContainsKey('InventoryDetailed')){$evidence['inventoryBaseline']=Get-PhaseAInventorySnapshot $FixtureBackend $fixture $Accounts[1] 'unauthorizedRead' 'BEFORE'}
     if ([string]::IsNullOrWhiteSpace([string]$before)) { throw 'inventory missing' }
     if (-not (& $FixtureBackend.Exists $fixture.protectedFile)) { throw 'protected file missing' }
     $null=Invoke-PhaseATrackedDeniedOperation $Accounts[1] $Tokens[1] $ActorBackend $FixtureBackend $fixture $evidence 'unauthorizedRead' 'Read' $fixture.protectedFile 'protectedFile'; $cases.unauthorizedRead=$true
@@ -90,10 +107,10 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
     $null=Invoke-PhaseATrackedDeniedOperation $Accounts[1] $Tokens[1] $ActorBackend $FixtureBackend $fixture $evidence 'unauthorizedCreate' 'Create' $deniedPath 'deniedFile'; $cases.unauthorizedCreate=$true
     if ((& $FixtureBackend.Inventory $fixture) -cne $before) { throw 'inventory changed after create' }; $cases.inventory=$true
     if (-not (& $FixtureBackend.Exists $fixture.protectedFile) -or (& $FixtureBackend.Exists ($fixture.protectedFile+'.renamed'))) { throw 'rename fixture invalid' }
-    $null=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Rename' $fixture.protectedFile 'denied'
+    $null=Invoke-PhaseATrackedDeniedOperation $Accounts[1] $Tokens[1] $ActorBackend $FixtureBackend $fixture $evidence 'unauthorizedRename' 'Rename' $fixture.protectedFile 'protectedFile'
     if ((& $FixtureBackend.Inventory $fixture) -cne $before) { throw 'inventory changed after rename' }; $cases.proposedRename=$true
     if (-not (& $FixtureBackend.Exists $fixture.protectedFile)) { throw 'delete fixture invalid' }
-    $null=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Delete' $fixture.protectedFile 'denied'
+    $null=Invoke-PhaseATrackedDeniedOperation $Accounts[1] $Tokens[1] $ActorBackend $FixtureBackend $fixture $evidence 'unauthorizedDelete' 'Delete' $fixture.protectedFile 'protectedFile'
     if ((& $FixtureBackend.Inventory $fixture) -cne $before) { throw 'inventory changed after delete' }; $cases.proposedDelete=$true
     $insecure=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Read' $fixture.controlFile 'allowed'
     if (Test-ActorObservation $insecure $Accounts[1].role 'denied') { throw 'insecure control accepted' }; $cases.insecureRejected=$true
@@ -203,7 +220,8 @@ function New-PhaseAStage3Backend {
     }
     CleanupVerified={ param($f) -not (Test-Path -LiteralPath $f.root -ErrorAction Stop) }
     Digest={ param($path) (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
-    Inventory={ param($f) Get-PhaseAInventory $f.protectedDir }
+    Inventory={ param($f) (Get-PhaseAInventory $f.protectedDir -Detailed).digest }
+    InventoryDetailed={ param($f) Get-PhaseAInventory $f.protectedDir -Detailed }
     Cleanup={ param($f) Remove-PhaseAFixture $f }
   }
 }
