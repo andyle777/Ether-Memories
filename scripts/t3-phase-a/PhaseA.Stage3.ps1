@@ -59,12 +59,27 @@ function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBa
     try { $entry.afterExists=& $FixtureBackend.Exists $Target; $entry.afterInventory=& $FixtureBackend.Inventory $Fixture; if($FixtureBackend.ContainsKey('InventoryDetailed')){$entry['afterDetails']=Get-PhaseAInventorySnapshot $FixtureBackend $Fixture $Account $Control 'AFTER'} } catch { $entry['afterDetails']=@{status='ERROR';reason='COLLECTION_FAILED';control=$Control;phase='AFTER'} }
   }
 }
+function Get-PhaseAManagerAclObservation($Fixture,[string]$Role,$Record,[string]$Source) {
+  $out=@{status='UNVERIFIED';reason='OBSERVATION_FAILED';fixtureId='';role=$Role;relative='';sequence=-1;descriptor='';protected=$false;source=$Source}
+  try {
+    if($Source -cnotin @('LIVE','INJECTED') -or $Fixture -isnot [hashtable] -or $Record -isnot [hashtable]) { return $out }
+    $roles=@{root=@('.',0);protected=@('protected',1);control=@('control',2)}; if(-not $roles.ContainsKey($Role)){return $out}
+    $root=[IO.Path]::GetFullPath($Fixture.root).TrimEnd('\');$id=[IO.Path]::GetFileName($root);$relative=$roles[$Role][0];$position=$roles[$Role][1]
+    if($id -cnotmatch '^ether-phase-a-store-[0-9a-f]{32}$' -or $Record.fixtureId -cne $id -or $Record.role -cne $Role -or $Record.relative -cne $relative -or $Record.sequence -ne $position){return $out}
+    if($Source -ceq 'LIVE' -and [IO.Path]::GetDirectoryName($root) -cne [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)).TrimEnd('\')){return $out}
+    $out.fixtureId=$id;$out.relative=$relative;$out.sequence=$position
+    $path=if($relative -ceq '.'){$root}else{[IO.Path]::Combine($root,$relative)}
+    foreach($p in @($root,$path)){ $item=Get-Item -LiteralPath $p -Force -ErrorAction Stop; if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $item.PSIsContainer){return $out} }
+    $acl=Get-Acl -LiteralPath $path -ErrorAction Stop;$out.descriptor=$acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access);$out.protected=[bool]$acl.AreAccessRulesProtected;$out.status='OBSERVED';$out.reason='NONE';return $out
+  } catch { return $out }
+}
 function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hashtable]$ActorBackend,[hashtable]$EvidenceSink=@{}) {
   $cases=@{acl=$false;authorizedRead=$false;authorizedCreate=$false;authorizedReadback=$false;
     unauthorizedRead=$false;unauthorizedWrite=$false;unauthorizedCreate=$false;proposedDelete=$false;proposedRename=$false;inventory=$false;insecureRejected=$false;fixtureCleanup=$false}
   $evidence=@{cleanupVerified=$false}; $EvidenceSink['evidence']=$evidence; $EvidenceSink['cases']=$cases; $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false
   try {
-    $fixture=& $FixtureBackend.Setup $Accounts $evidence
+    $observer={param($f,$record) if($FixtureBackend.ContainsKey('ObserveAcl')) { try {$o=& $FixtureBackend.ObserveAcl $f $record.role $record; if(-not $evidence.ContainsKey('aclCorroboration')){$evidence['aclCorroboration']=New-Object 'System.Collections.Generic.List[object]'};$evidence.aclCorroboration.Add($o);if($o.status -ceq 'OBSERVED' -and -not $evidence.ContainsKey('aclFixtureBinding')){$evidence['aclFixtureBinding']=@{fixtureId=$o.fixtureId;rootIdentity=[IO.Path]::GetFullPath($f.root).TrimEnd('\');brokerSid=$Accounts[0].sid;legacySid=$Accounts[1].sid;source=$o.source}}}catch{} }}.GetNewClosure()
+    $fixture=& $FixtureBackend.Setup $Accounts $evidence $observer
     if ($null -eq $fixture -or ($fixture.aclInspected -isnot [bool] -or -not $fixture.aclInspected)) { throw 'STAGE3_ACL_REJECTED' }
     if ($fixture -is [hashtable] -and $fixture.ContainsKey('aclEvidence')) { $evidence['aclInspection']=$fixture.aclEvidence }
     $cases.acl=$true; $status='STAGE3_CASE_FAILED'
@@ -151,7 +166,7 @@ function Set-PhaseAFixtureAcl([string]$Path,[string[]]$FullSids,[string[]]$ReadS
   if (-not $actual.AreAccessRulesProtected -or $actualSddl -cne $expectedSddl) { throw 'STAGE3_ACL_REJECTED' }
   return @{expected=$expectedSddl;actual=$actualSddl;protected=[bool]$actual.AreAccessRulesProtected}
 }
-function Invoke-PhaseARecordedFixtureAcl($Records,$Fixture,[string]$Role,[string]$Path,[int]$Sequence,[string[]]$FullSids,[string[]]$ReadSids,[string]$Source,[hashtable]$Io=@{}) {
+function Invoke-PhaseARecordedFixtureAcl($Records,$Fixture,[string]$Role,[string]$Path,[int]$Sequence,[string[]]$FullSids,[string[]]$ReadSids,[string]$Source,[hashtable]$Io=@{},[scriptblock]$Observe=$null) {
   $roles=@{root=@('.',0);protected=@('protected',1);control=@('control',2)}
   if (-not $roles.ContainsKey($Role) -or $Sequence -ne $roles[$Role][1] -or $Source -cnotin @('LIVE','INJECTED')) { throw 'STAGE3_ACL_REJECTED' }
   $root=[IO.Path]::GetFullPath($Fixture.root).TrimEnd('\'); $id=[IO.Path]::GetFileName($root); $relative=$roles[$Role][0]
@@ -160,6 +175,7 @@ function Invoke-PhaseARecordedFixtureAcl($Records,$Fixture,[string]$Role,[string
   $Records.Add($record)
   try { $exists=if($Io.ContainsKey('Exists')) { & $Io.Exists $Path } else { [IO.Directory]::Exists($Path) }; if($exists -isnot [bool] -or -not $exists) { $record.reason='TARGET_MISSING'; throw 'STAGE3_ACL_REJECTED' }; $record.targetExists=$true; return Set-PhaseAFixtureAcl $Path $FullSids $ReadSids $record $Io }
   catch { if($record.reason -ceq 'NONE'){$record.reason='SETUP_FAILED'}; throw 'STAGE3_ACL_REJECTED' }
+  finally { if($null -ne $Observe){& $Observe $Fixture $record} }
 }
 function Remove-PhaseAFixture($Fixture) {
   $root=[IO.Path]::GetFullPath($Fixture.root); $parent=[IO.Path]::GetFullPath($Fixture.parent).TrimEnd('\')
@@ -180,7 +196,8 @@ function Remove-PhaseAFixture($Fixture) {
 }
 function New-PhaseAStage3Backend {
   return @{
-    Setup={ param($accounts,$evidence)
+    ObserveAcl={param($fixture,$role,$record) Get-PhaseAManagerAclObservation $fixture $role $record 'LIVE'}
+    Setup={ param($accounts,$evidence,$observe)
       $common=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
       if ([string]::IsNullOrWhiteSpace($common)) { throw 'STAGE3_SETUP_FAILED' }
       $parent=[IO.Path]::GetFullPath($common).TrimEnd('\')
@@ -199,12 +216,12 @@ function New-PhaseAStage3Backend {
         if ($drive.DriveFormat -cne 'NTFS') { throw 'NTFS required' }
         $null=New-Item -ItemType Directory -Path $root -ErrorAction Stop; $created=$true
         if (((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'fixture reparse point rejected' }
-        try { $null=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'root' $root 0 @($manager,'S-1-5-18') @($accounts[0].sid,$accounts[1].sid) 'LIVE' } catch { throw 'STAGE3_ACL_REJECTED' }
+        try { $null=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'root' $root 0 @($manager,'S-1-5-18') @($accounts[0].sid,$accounts[1].sid) 'LIVE' @{} $observe } catch { throw 'STAGE3_ACL_REJECTED' }
         $null=New-Item -ItemType Directory -Path $protectedDir -ErrorAction Stop
         $null=New-Item -ItemType Directory -Path $controlDir -ErrorAction Stop
         try {
-          $protectedAcl=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'protected' $protectedDir 1 @($manager,'S-1-5-18',$accounts[0].sid) @() 'LIVE'
-          $null=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'control' $controlDir 2 @($manager,'S-1-5-18',$accounts[0].sid,$accounts[1].sid) @() 'LIVE'
+          $protectedAcl=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'protected' $protectedDir 1 @($manager,'S-1-5-18',$accounts[0].sid) @() 'LIVE' @{} $observe
+          $null=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'control' $controlDir 2 @($manager,'S-1-5-18',$accounts[0].sid,$accounts[1].sid) @() 'LIVE' @{} $observe
         } catch { throw 'STAGE3_ACL_REJECTED' }
         [IO.File]::WriteAllText($f.protectedFile,'ether-phase-a-synthetic',[Text.Encoding]::ASCII)
         [IO.File]::WriteAllText($f.controlFile,'ether-phase-a-control',[Text.Encoding]::ASCII)

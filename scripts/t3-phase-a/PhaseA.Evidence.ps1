@@ -74,7 +74,7 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
       if ([string]::IsNullOrEmpty($boundAudience) -or (Get-PhaseAEvidenceAudience $candidate $RunAttempt) -cne $boundAudience) { return $false }
       if ($kind -ceq 'authorization') { return ($ProvenanceVerified -and $LiveAuthorized) }
       if ($kind -ceq 'workflow_provenance') { return $ProvenanceVerified }
-      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclInspection','protectedInventory','unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) { return $false }
+      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclEstablishment','aclInspection','protectedInventory','unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) { return $false }
       $fresh=New-PhaseAManagerVerdictInput $candidate.commit $candidate.runId
       Add-PhaseAActorEvidence $fresh $items $EvidenceClass
       Add-PhaseAPrimaryTokenEvidence $fresh $TokenJournal $items $EvidenceClass
@@ -234,9 +234,39 @@ function Add-PhaseAProtectedInventoryEvidence($VerdictInput,$Evidence,[string]$E
   if($VerdictInput.cases.protectedInventory.state -ceq 'NOT_RUN'){$VerdictInput.cases.protectedInventory=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$proof}}
  } catch {return}
 }
+function Add-PhaseAAclEstablishmentEvidence($VerdictInput,$Evidence,[string]$EvidenceClass,$ActorJournal) {
+ try {
+  if($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $Evidence.cleanupVerified -isnot [bool] -or -not $Evidence.ContainsKey('aclEstablishment') -or -not $Evidence.ContainsKey('aclCorroboration') -or -not $Evidence.ContainsKey('aclFixtureBinding')){return}
+  $src=if($EvidenceClass -ceq 'LIVE_OBSERVED'){'LIVE'}else{'INJECTED'};$actors=@($ActorJournal);if($actors.Count -lt 2){return}
+  foreach($i in 0,1){$a=$actors[$i];$role=@('broker','legacy')[$i];if($a.role -cne $role -or $a.operation -cne 'probe' -or $a.accountSid -cne $a.tokenSid -or $a.observation.expectedSid -cne $a.accountSid -or $a.observation.contained -isnot [bool] -or -not $a.observation.contained -or $a.observation.terminated -isnot [bool] -or -not $a.observation.terminated -or -not (Test-ActorObservation $a.observation $role 'allowed')){return}}
+  $broker=$actors[0].accountSid;$legacy=$actors[1].accountSid;$manager=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $binding=$Evidence.aclFixtureBinding;if($binding -isnot [hashtable] -or $binding.source -cne $src -or $binding.brokerSid -cne $broker -or $binding.legacySid -cne $legacy -or $binding.fixtureId -cnotmatch '^ether-phase-a-store-[0-9a-f]{32}$'){return}
+  if($binding.rootIdentity -isnot [string] -or $binding.rootIdentity -cne [IO.Path]::GetFullPath($binding.rootIdentity).TrimEnd('\') -or [IO.Path]::GetFileName($binding.rootIdentity) -cne $binding.fixtureId){return};if($src -ceq 'LIVE' -and [IO.Path]::GetDirectoryName($binding.rootIdentity) -cne [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)).TrimEnd('\')){return}
+  if($broker -ceq $legacy -or $broker -ceq $manager -or $legacy -ceq $manager -or $broker -ceq 'S-1-5-18' -or $legacy -ceq 'S-1-5-18'){return}
+  $records=@($Evidence.aclEstablishment | ForEach-Object {$_});$observed=@($Evidence.aclCorroboration | ForEach-Object {$_});if($records.Count -lt 1 -or $records.Count -gt 3 -or $records.Count -ne $observed.Count){return}
+  $id='';$proofs=New-Object 'System.Collections.Generic.List[object]';$violated=$false
+  for($i=0;$i -lt $records.Count;$i++){
+   $r=$records[$i];$o=$observed[$i];$role=@('root','protected','control')[$i];$relative=@('.','protected','control')[$i]
+   if($r -isnot [hashtable] -or $o -isnot [hashtable] -or $r.fixtureId -cnotmatch '^ether-phase-a-store-[0-9a-f]{32}$' -or ($i -gt 0 -and $r.fixtureId -cne $id) -or $o.fixtureId -cne $r.fixtureId -or $r.role -cne $role -or $o.role -cne $role -or $r.relative -cne $relative -or $o.relative -cne $relative -or $r.sequence -ne $i -or $o.sequence -ne $i -or $r.source -cne $src -or $o.source -cne $src){return};$id=$r.fixtureId;if($id -cne $binding.fixtureId){return}
+   if($r.targetExists -isnot [bool] -or -not $r.targetExists -or $r.attempted -isnot [bool] -or -not $r.attempted -or $r.applied -isnot [bool] -or -not $r.applied -or $r.expectedProtected -isnot [bool] -or -not $r.expectedProtected -or $r.actualProtected -isnot [bool] -or $o.protected -isnot [bool] -or $o.status -cne 'OBSERVED' -or $o.reason -cne 'NONE'){return}
+   $acl=New-Object Security.AccessControl.DirectorySecurity;$acl.SetAccessRuleProtection($true,$false)
+   $full=if($i -eq 0){@($manager,'S-1-5-18')}elseif($i -eq 1){@($manager,'S-1-5-18',$broker)}else{@($manager,'S-1-5-18',$broker,$legacy)};$read=if($i -eq 0){@($broker,$legacy)}else{@()}
+   foreach($spec in @(@{sids=$full;rights='FullControl'},@{sids=$read;rights='ReadAndExecute'})){foreach($sidText in $spec.sids){$sid=New-Object Security.Principal.SecurityIdentifier($sidText);$rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,$spec.rights,'ContainerInherit,ObjectInherit','None','Allow');$acl.AddAccessRule($rule)}}
+   $expected=$acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+   if($r.expected -cne $expected -or $r.actual -isnot [string] -or [string]::IsNullOrEmpty($r.actual) -or $r.actual -cne $o.descriptor -or $r.actualProtected -cne $o.protected){return}
+   $raw=New-Object Security.AccessControl.RawSecurityDescriptor($o.descriptor);$protectedFlag=($raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0;if($protectedFlag -cne $o.protected){return}
+   $mismatch=($o.descriptor -cne $expected -or -not $o.protected)
+   if(($mismatch -and $r.reason -cne 'DESCRIPTOR_MISMATCH') -or (-not $mismatch -and $r.reason -cne 'NONE')){return}
+   $proofs.Add([ordered]@{fixture=$id;role=$role;relative=$relative;sequence=$i;expected=$expected;actual=$r.actual;manager=$o.descriptor;protected=$o.protected});if($mismatch){if($records.Count -ne ($i+1)){return};$violated=$true;break}
+  }
+  if(-not $violated -and ($records.Count -ne 3 -or -not $Evidence.cleanupVerified)){return}
+  $state=if($violated){'FAIL'}else{'PASS'};$reason=if($violated){'VIOLATION'}else{'NONE'};$canonical=[ordered]@{control='aclEstablishment';broker=$broker;legacy=$legacy;manager=$manager;records=$proofs.ToArray();cleanup=$Evidence.cleanupVerified;state=$state};$sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -InputObject $canonical -Compress -Depth 8;$proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()};if($VerdictInput.cases.aclEstablishment.state -ceq 'NOT_RUN'){$VerdictInput.cases.aclEstablishment=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$proof}}
+ }catch{return}
+}
 function Add-PhaseAStage3Evidence($VerdictInput,$Evidence,[string]$EvidenceClass,$ActorJournal=@()) {
   try {
     if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $Evidence -isnot [hashtable] -or $Evidence.cleanupVerified -isnot [bool]) { return }
+    Add-PhaseAAclEstablishmentEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
     Add-PhaseAProtectedInventoryEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
     if ($Evidence.cleanupVerified -and $Evidence.ContainsKey('aclInspection')) {
       $acl=$Evidence.aclInspection
