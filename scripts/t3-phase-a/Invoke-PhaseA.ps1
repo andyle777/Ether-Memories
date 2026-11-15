@@ -27,9 +27,10 @@ $config = @{
 $repository = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $tokenJournal=New-Object 'System.Collections.Generic.List[object]'
 $actorJournal=New-Object 'System.Collections.Generic.List[object]'
+$preflightJournal=New-Object 'System.Collections.Generic.List[object]'
 $stage3Result=@{}; $hostedResult=@{}; $stage=$null; $adversarialStatus='NOT_RUN'; $supervision=@{injected='NOT_RUN';sameIdentity='NOT_RUN'}
 $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
-  elseif (-not (Test-PhaseACheckout $repository $config.sha $RequiredBase)) { "CHECKOUT_REJECTED" }
+  elseif (-not (Test-PhaseACheckout $repository $config.sha $RequiredBase $preflightJournal)) { "CHECKOUT_REJECTED" }
   elseif (($adversarialStatus=Get-PhaseAAdversarialStatus (Invoke-PhaseAAdversarialControls)) -ceq 'FAIL') { 'ADVERSARIAL_CONTROL_FAILED' }
   elseif ($EnableSupervisorProbe -and (($supervision=Invoke-PhaseASupervisorEvidence { try { $null=& (Join-Path $PSScriptRoot 'PhaseA.Job.Tests.ps1') } catch { throw 'SUPERVISOR_JOB_PROBE_FAILED' }; try { $null=& (Join-Path $PSScriptRoot 'PhaseA.Supervisor.Tests.ps1') } catch { throw 'SUPERVISOR_DEATH_PROBE_FAILED' }; return $true }).sameIdentity -cne 'SAME_IDENTITY_PASS' -or $supervision.injected -cne 'SIMULATED_PASS')) { $supervision.reason }
   elseif ($EnableAccountStage -and -not $EnableSupervisorProbe) { 'SUPERVISOR_PROBE_REQUIRED' }

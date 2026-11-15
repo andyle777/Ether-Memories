@@ -139,27 +139,56 @@ function Test-PhaseAPins([hashtable]$Pins) {
   }
   return $true
 }
-function Invoke-PhaseAGit([string]$Repository, [string]$Arguments) {
+function Invoke-PhaseAGit([string]$Repository, [string]$Arguments, $Journal=$null, [scriptblock]$ProcessFactory={New-Object Diagnostics.Process}, [string]$Experiment='', [string]$Operation='OTHER', [int]$Sequence=0, [scriptblock]$Observer={param($id) $other=Get-Process -Id $id -ErrorAction Stop;try{return @{pid=$other.Id;createdAt=$other.StartTime.ToUniversalTime().ToString('o')}}finally{$other.Dispose()}}) {
+  if($Experiment -ceq ''){$Experiment=[Guid]::NewGuid().ToString('N')}
+  $record=@{role='CHECKOUT_PREFLIGHT';experiment=$Experiment;operation=$Operation;sequence=$Sequence;attempt=[Guid]::NewGuid().ToString('N');launch='ATTEMPTED';pid=$null;createdAt=$null;observedPid=$null;observedCreatedAt=$null;identity='NOT_OBSERVED';waitAttempted=$false;firstWait='NOT_RUN';wait='NOT_RUN';termination='NOT_REQUESTED';exitObserved=$false;exitCode=$null;managedDispose='NOT_ATTEMPTED';nativeClose='NOT_OBSERVED';error='NONE'}
+  if($null -ne $Journal){$Journal.Add($record)}
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.FileName = 'git.exe'; $start.Arguments = $Arguments; $start.WorkingDirectory = $Repository
   $start.UseShellExecute = $false; $start.CreateNoWindow = $true
   $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-  $p = New-Object Diagnostics.Process; $p.StartInfo = $start
+  $p=$null
+  $result=$null;$keep=$false
   try {
-    if (-not $p.Start()) { return $null }
+    $p = & $ProcessFactory; $p.StartInfo = $start
+    if (-not $p.Start()) { $record.launch='FAILED';$record.error='START_FAILED';throw 'start failed' }
+    $record.launch='CREATED';$record.pid=$p.Id
+    try{$record.createdAt=$p.StartTime.ToUniversalTime().ToString('o')}catch{$record.error='CREATION_TIME_UNAVAILABLE'}
+    try{$independent=& $Observer $record.pid;if($independent -is [hashtable]){$record.observedPid=$independent.pid;$record.observedCreatedAt=$independent.createdAt;if($record.pid -eq $independent.pid -and $record.createdAt -and $record.createdAt -ceq $independent.createdAt){$record.identity='MATCHED'}else{$record.identity='MISMATCH';$record.error='IDENTITY_MISMATCH'}}else{$record.identity='UNAVAILABLE';$record.error='IDENTITY_UNAVAILABLE'}}catch{$record.identity='UNAVAILABLE';$record.error='IDENTITY_UNAVAILABLE'}
     $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-    if (-not $p.WaitForExit(10000)) { $p.Kill(); $null = $p.WaitForExit(5000); return $null }
-    return @{ code=$p.ExitCode; output=$out.Result.Trim(); error=$err.Result }
-  } catch { return $null } finally { $p.Dispose() }
+    $record.waitAttempted=$true
+    if (-not $p.WaitForExit(10000)) { $record.firstWait='TIMEOUT';$record.wait='TIMEOUT';$record.termination='REQUESTED';$p.Kill();if($p.WaitForExit(5000)){$record.wait='SIGNALED';$record.exitObserved=$true;try{$record.exitCode=$p.ExitCode}catch{$record.error='EXIT_CODE_UNAVAILABLE'}}else{$record.wait='UNCONFIRMED';$record.error='TERMINATION_UNCONFIRMED';$keep=$true} }
+    else {$record.firstWait='SIGNALED';$record.wait='SIGNALED';$record.exitObserved=$true;$record.exitCode=$p.ExitCode;$result=@{ code=$p.ExitCode; output=$out.Result.Trim(); error=$err.Result }}
+  } catch { if($record.launch -ceq 'ATTEMPTED'){$record.launch='FAILED';$record.error='START_FAILED'}elseif($record.launch -ceq 'CREATED' -and $record.wait -cne 'SIGNALED'){if($record.waitAttempted -and $record.firstWait -ceq 'NOT_RUN'){$record.firstWait='FAILED'};$record.wait='UNCONFIRMED';$record.error='WAIT_UNCONFIRMED';$keep=$true}elseif($record.wait -ceq 'SIGNALED' -and $record.error -ceq 'NONE'){$record.error='EXIT_OR_OUTPUT_UNAVAILABLE'} } finally {
+    if($keep){if(-not (Get-Variable -Name PhaseAUnconfirmedPreflightProcesses -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseAUnconfirmedPreflightProcesses=New-Object 'System.Collections.Generic.List[object]'};$script:PhaseAUnconfirmedPreflightProcesses.Add($p);$record.managedDispose='RETAINED'}
+    elseif($null -ne $p) {try{$p.Dispose();$record.managedDispose='DISPOSE_RETURNED'}catch{$record.managedDispose='FAILED';$record.error='DISPOSAL_FAILED';$result=$null}}
+  }
+  return $result
 }
-function Test-PhaseACheckout([string]$Repository, [string]$ExpectedHead, [string]$Base) {
+function Test-PhaseAPreflightJournal($Journal,[string]$Experiment,[string[]]$Operations) {
+  try {
+    if($Experiment -cnotmatch '^[0-9a-f]{32}$' -or $null -eq $Journal -or $Journal.Count -ne $Operations.Count){return $false}
+    $seen=@{}
+    for($i=0;$i -lt $Operations.Count;$i++){
+      $r=$Journal[$i]
+      if($r -isnot [hashtable] -or $r.role -cne 'CHECKOUT_PREFLIGHT' -or $r.experiment -cne $Experiment -or $r.operation -cne $Operations[$i] -or $r.sequence -ne $i -or $r.attempt -cnotmatch '^[0-9a-f]{32}$' -or $seen.ContainsKey($r.attempt)){return $false}
+      $seen[$r.attempt]=$true
+      $stamp=[DateTimeOffset]::MinValue
+      if($r.launch -cne 'CREATED' -or $r.pid -isnot [int] -or $r.pid -le 0 -or $r.identity -cne 'MATCHED' -or $r.observedPid -ne $r.pid -or -not [DateTimeOffset]::TryParse([string]$r.createdAt,[ref]$stamp) -or $r.createdAt -cne $r.observedCreatedAt -or $r.waitAttempted -isnot [bool] -or -not $r.waitAttempted -or $r.firstWait -cne 'SIGNALED' -or $r.wait -cne 'SIGNALED' -or $r.termination -cne 'NOT_REQUESTED' -or $r.exitObserved -isnot [bool] -or -not $r.exitObserved -or $r.exitCode -isnot [int] -or $r.managedDispose -cne 'DISPOSE_RETURNED' -or $r.nativeClose -cne 'NOT_OBSERVED' -or $r.error -cne 'NONE'){return $false}
+    }
+    return $true
+  } catch { return $false }
+}
+function Test-PhaseACheckout([string]$Repository, [string]$ExpectedHead, [string]$Base, $Journal=$null, [scriptblock]$ProcessFactory={New-Object Diagnostics.Process}, [scriptblock]$Observer={param($id) $other=Get-Process -Id $id -ErrorAction Stop;try{return @{pid=$other.Id;createdAt=$other.StartTime.ToUniversalTime().ToString('o')}}finally{$other.Dispose()}}) {
   if ($ExpectedHead -cnotmatch '^[0-9a-f]{40}$' -or $Base -cnotmatch '^[0-9a-f]{40}$') { return $false }
-  $head = Invoke-PhaseAGit $Repository 'rev-parse HEAD'
-  if ($null -eq $head -or $head.code -ne 0 -or $head.output -cne $ExpectedHead) { return $false }
-  $ancestor = Invoke-PhaseAGit $Repository ("merge-base --is-ancestor " + $Base + " " + $ExpectedHead)
-  if ($null -eq $ancestor -or $ancestor.code -ne 0) { return $false }
-  $clean = Invoke-PhaseAGit $Repository 'diff --quiet HEAD --'
-  if ($null -eq $clean -or $clean.code -ne 0) { return $false }
+  if($null -eq $Journal){$Journal=New-Object 'System.Collections.Generic.List[object]'}
+  if($Journal.Count -ne 0){return $false};$experiment=[Guid]::NewGuid().ToString('N')
+  $head = Invoke-PhaseAGit $Repository 'rev-parse HEAD' $Journal $ProcessFactory $experiment 'HEAD' 0 $Observer
+  if ($null -eq $head -or $head.code -ne 0 -or $head.output -cne $ExpectedHead -or -not (Test-PhaseAPreflightJournal $Journal $experiment @('HEAD'))) { return $false }
+  $ancestor = Invoke-PhaseAGit $Repository ("merge-base --is-ancestor " + $Base + " " + $ExpectedHead) $Journal $ProcessFactory $experiment 'ANCESTOR' 1 $Observer
+  if ($null -eq $ancestor -or $ancestor.code -ne 0 -or -not (Test-PhaseAPreflightJournal $Journal $experiment @('HEAD','ANCESTOR'))) { return $false }
+  $clean = Invoke-PhaseAGit $Repository 'diff --quiet HEAD --' $Journal $ProcessFactory $experiment 'CLEAN' 2 $Observer
+  if ($null -eq $clean -or $clean.code -ne 0 -or -not (Test-PhaseAPreflightJournal $Journal $experiment @('HEAD','ANCESTOR','CLEAN'))) { return $false }
   $pins = @{}
   foreach ($path in @('.t3-phase2-harness/Actor.ps1','.t3-phase2-harness/Invoke-Phase2.ps1',
     '.t3-phase2-harness/JobSupervisor.ps1','.t3-phase2-harness/Test-JobObject.ps1',
