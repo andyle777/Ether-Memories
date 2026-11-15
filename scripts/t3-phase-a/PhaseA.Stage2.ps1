@@ -72,6 +72,25 @@ function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashta
   if ($stage -ceq 'ACCOUNT_CONSUMER_FAILED') { return $state.reason }
   return $stage
 }
+function Invoke-PhaseABoundProcessLaunch($processRecord,[scriptblock]$launch) {
+  $processRecord.launchAttempted=$true
+  try{$child=& $launch;$processRecord.launchResult='CREATED';return $child}catch{$processRecord.launchResult='CREATE_FAILED';throw}
+}
+function Invoke-PhaseAProcessTokenPair($process,$processRecord,$owner,[scriptblock]$inspect) {
+  $processRecord.inspectionAttempted=$true
+  try {
+    $observed=& $inspect $process
+    $first=@{};foreach($key in @('pid','createdAt','sid','primary','admin','elevated','standard','tokenId','authenticationId','modifiedId')){$first[$key]=$observed.$key};$processRecord.first=$first
+    $again=& $inspect $process
+    $second=@{};foreach($key in @('pid','createdAt','sid','primary','admin','elevated','standard','tokenId','authenticationId','modifiedId')){$second[$key]=$again.$key};$processRecord.second=$second;$processRecord.inspectionResult='OBSERVED'
+    return $observed
+  } catch {
+    $failure=$_.Exception.GetBaseException().Message
+    if($failure -ceq 'TOKEN_INSPECTION_CLOSE_FAILED'){$processRecord.inspectionResult='TOKEN_CLOSE_FAILED';$processRecord.cleanup='RESOURCE_FAILED';$owner.launchFailure='PROCESS_TOKEN_CLOSE_FAILED';throw 'STAGE2_CLEANUP_FAILED'}
+    $processRecord.inspectionResult=if($failure -cin @('PROCESS_TOKEN_OPEN_DENIED','PROCESS_TOKEN_OPEN_FAILED','PROCESS_TOKEN_QUERY_FAILED')){$failure}else{'PROCESS_OBSERVATION_FAILED'}
+    $owner.launchFailure='PROCESS_OBSERVATION_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'
+  }
+}
 function New-PhaseAStage2Backend {
   $backend=@{ Run={ param($account,$token,$operation,$operationTarget)
     $common=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
@@ -83,7 +102,7 @@ function New-PhaseAStage2Backend {
     if ([string]::IsNullOrEmpty($operation)) { $operation='Create' }
     if ($operation -notin @('Create','Read','Overwrite','Delete','Rename')) { throw 'invalid operation' }
     if ([string]::IsNullOrEmpty($operationTarget)) { $operationTarget=$target }
-    $job=[IntPtr]::Zero; $child=$null; $process=$null; $safeToRemove=$true; $cleanupFailed=$false; $createdRoot=$false; $tokenRef=$false; $launchHandle=$null
+    $job=[IntPtr]::Zero; $child=$null; $process=$null; $safeToRemove=$true; $cleanupFailed=$false; $createdRoot=$false; $tokenRef=$false; $launchHandle=$null; $processRecord=$null
     try {
       $null=New-Item -ItemType Directory -Path $root -ErrorAction Stop; $createdRoot=$true
       $item=Get-Item -LiteralPath $root -Force -ErrorAction Stop
@@ -103,17 +122,29 @@ function New-PhaseAStage2Backend {
       $job=[EtherPhaseAJob]::Create()
       if(-not (Get-Variable -Name PhaseATokenOwners -Scope Script -ErrorAction SilentlyContinue) -or -not $script:PhaseATokenOwners.ContainsKey($token)){throw 'STAGE2_OBSERVATION_REJECTED'}
       $owner=$script:PhaseATokenOwners[$token]
+      $processRecord=@{source='LIVE';role=$account.role;accountSid=$account.sid;launchAttempted=$false;launchResult='NOT_ATTEMPTED';inspectionAttempted=$false;inspectionResult='NOT_ATTEMPTED';cleanup='NOT_OBSERVED'}
+      $owner.processObservation=$processRecord
+      if(-not $owner.ContainsKey('processObservations')){$owner.processObservations=New-Object 'System.Collections.Generic.List[object]'}
+      $owner.processObservations.Add($processRecord)
+      $null=$script:PhaseATrustedProcessTokenRecords.Add($processRecord)
       $launchHandle=$token.handle;$launchHandle.DangerousAddRef([ref]$tokenRef);$tokenPointer=$launchHandle.DangerousGetHandle()
       try{$beforeLaunch=[EtherPhaseANative]::InspectTokenHandle($tokenPointer)}catch{$owner.launchFailure='TOKEN_STATISTICS_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
       if(-not (Test-PhaseAOwnedLaunchToken $owner $account $beforeLaunch)){$owner.launchFailure='TOKEN_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}
-      $child=[EtherPhaseAAtomic]::CreateWithTokenInDirectory($tokenPointer,$job,$exe,$cmd,$root)
+      $processRecord.launchTokenId=$beforeLaunch.tokenId;$processRecord.launchAuthenticationId=$beforeLaunch.authenticationId;$processRecord.launchModifiedId=$beforeLaunch.modifiedId
+      $child=Invoke-PhaseABoundProcessLaunch $processRecord { [EtherPhaseAAtomic]::CreateWithTokenInDirectory($tokenPointer,$job,$exe,$cmd,$root) }
       $safeToRemove=$false
-      if (-not $child.InJob() -or $child.Exited()) { throw 'child not contained or already exited' }
-      $process=Get-Process -Id $child.Pid -ErrorAction Stop
-      try{$observed=Get-PhaseAProcessToken $process $true}catch{if($_.Exception.GetBaseException().Message -ceq 'TOKEN_INSPECTION_CLOSE_FAILED'){$owner.launchFailure='PROCESS_TOKEN_CLOSE_FAILED';throw 'STAGE2_CLEANUP_FAILED'};$owner.launchFailure='PROCESS_OBSERVATION_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
-      if ($observed.pid -ne $child.Pid -or $observed.sid -cne $account.sid -or $observed.admin -or $observed.elevated -or -not $observed.standard) { throw 'STAGE2_OBSERVATION_REJECTED' }
+      $processRecord.contained=$false;$processRecord.pid=[int]$child.Pid
+      try{$inJob=$child.InJob();$alreadyExited=$child.Exited()}catch{$processRecord.inspectionResult='CONTAINMENT_QUERY_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
+      if (-not $inJob -or $alreadyExited) { $processRecord.inspectionResult='CONTAINMENT_REJECTED';throw 'child not contained or already exited' }
+      $processRecord.contained=$true
+      try{$process=Get-Process -Id $child.Pid -ErrorAction Stop;$processRecord.createdAt=$process.StartTime.ToUniversalTime().ToString('o')}catch{$processRecord.inspectionResult='PROCESS_OPEN_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
+      try{$observed=Invoke-PhaseAProcessTokenPair $process $processRecord $owner {param($p) Get-PhaseAProcessToken $p $true}}catch{if($_.Exception.GetBaseException().Message -ceq 'STAGE2_CLEANUP_FAILED'){$cleanupFailed=$true};throw}
+      $first=$processRecord.first;$second=$processRecord.second
       try{$afterLaunch=[EtherPhaseANative]::InspectTokenHandle($tokenPointer)}catch{$owner.launchFailure='TOKEN_STATISTICS_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
+      $processRecord.postTokenId=$afterLaunch.tokenId;$processRecord.postAuthenticationId=$afterLaunch.authenticationId;$processRecord.postModifiedId=$afterLaunch.modifiedId
       foreach($key in @('tokenId','authenticationId','modifiedId')){if($afterLaunch.$key -cne $beforeLaunch.$key){$owner.launchFailure='TOKEN_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}}
+      foreach($key in @('pid','createdAt','sid','primary','admin','elevated','standard','tokenId','authenticationId','modifiedId')){if($first[$key] -cne $second[$key]){$owner.launchFailure='PROCESS_OBSERVATION_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}}
+      if ($observed.pid -ne $child.Pid -or $observed.createdAt -cne $processRecord.createdAt -or $observed.sid -cne $account.sid -or $observed.admin -or $observed.elevated -or -not $observed.standard) { $owner.launchFailure='PROCESS_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED' }
       if(-not $observed.primary -or $observed.authenticationId -cne $beforeLaunch.authenticationId){$owner.launchFailure='PROCESS_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}
       $child.Resume()
       $deadline=[DateTime]::UtcNow.AddSeconds(20)
@@ -153,6 +184,7 @@ function New-PhaseAStage2Backend {
         if ($safeToRemove) { try { $child.Dispose() } catch { $cleanupFailed=$true } }
       }
       if ($process) { try { $process.Dispose() } catch { $cleanupFailed=$true } }
+      if($processRecord){$processRecord.cleanup=if(-not $safeToRemove){'CHILD_UNCONFIRMED'}elseif($cleanupFailed){'RESOURCE_FAILED'}else{'PROCESS_CONFIRMED'}}
       if (-not $safeToRemove) { throw 'STAGE2_CHILD_UNCONFIRMED' }
       if ($createdRoot -and [IO.Directory]::Exists($root)) {
         $resolved=[IO.Path]::GetFullPath($root)
@@ -170,7 +202,7 @@ function New-PhaseAStage2Backend {
           [IO.Directory]::Delete($resolved,$false)
         } catch { $cleanupFailed=$true }
       }
-      if ($cleanupFailed) { throw 'STAGE2_CLEANUP_FAILED' }
+      if ($cleanupFailed) { if($processRecord){$processRecord.cleanup='RESOURCE_FAILED'};throw 'STAGE2_CLEANUP_FAILED' }
     }
   } }
   if(-not (Get-Variable -Name PhaseATrustedActorBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}

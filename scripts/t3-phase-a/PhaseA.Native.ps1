@@ -36,7 +36,11 @@ public static class EtherPhaseANative {
     public static TokenRecord Inspect(Process process, bool requireClose) {
         if (process.HasExited) throw new InvalidOperationException("Process exited");
         IntPtr token;
-        if (!OpenProcessToken(process.Handle, 0x0008, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (!OpenProcessToken(process.Handle, 0x0008, out token)) {
+            int error=Marshal.GetLastWin32Error();
+            if(requireClose) throw new InvalidOperationException(error==5 ? "PROCESS_TOKEN_OPEN_DENIED" : "PROCESS_TOKEN_OPEN_FAILED");
+            throw new Win32Exception(error);
+        }
         try {
             int elevation, size;
             if (!GetTokenInformation(token, 20, out elevation, sizeof(int), out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -50,6 +54,9 @@ public static class EtherPhaseANative {
                 TokenRecord record=InspectTokenHandle(token); record.pid=process.Id;record.sid=identity.User.Value;record.admin=admin;
                 record.elevated=elevation != 0;record.standard=standard;record.createdAt=process.StartTime.ToUniversalTime().ToString("o");return record;
             }
+        } catch(Win32Exception) {
+            if(requireClose) throw new InvalidOperationException("PROCESS_TOKEN_QUERY_FAILED");
+            throw;
         } finally { if(!CloseHandle(token) && requireClose) throw new InvalidOperationException("TOKEN_INSPECTION_CLOSE_FAILED"); }
     }
 }

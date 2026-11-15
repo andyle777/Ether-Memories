@@ -11,6 +11,26 @@ if(-not (Get-Variable -Name PhaseATrustedTokenRecords -Scope Script -ErrorAction
 if(-not (Get-Variable -Name PhaseATokenOwners -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATokenOwners=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
 if(-not (Get-Variable -Name PhaseATrustedActorBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
 if(-not (Get-Variable -Name PhaseATrustedActorRecords -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorRecords=New-Object 'System.Collections.Generic.HashSet[object]'}
+if(-not (Get-Variable -Name PhaseATrustedProcessTokenRecords -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedProcessTokenRecords=New-Object 'System.Collections.Generic.HashSet[object]'}
+function Get-PhaseAProcessTokenObservation($item,$r,[string]$source) {
+  try {
+    if($r -isnot [hashtable] -or $r.source -cne $source -or $r.role -cne $item.role -or $r.accountSid -cne $item.accountSid){return 'UNVERIFIED'}
+    if($source -ceq 'LIVE' -and -not $script:PhaseATrustedProcessTokenRecords.Contains($r)){return 'UNVERIFIED'}
+    if($r.launchAttempted -isnot [bool] -or -not $r.launchAttempted -or $r.launchResult -cne 'CREATED' -or $r.inspectionAttempted -isnot [bool] -or -not $r.inspectionAttempted -or $r.inspectionResult -cne 'OBSERVED'){return 'UNVERIFIED'}
+    if($r.contained -isnot [bool] -or -not $r.contained -or $r.pid -isnot [int] -or $r.pid -le 0){return 'UNVERIFIED'}
+    $t=[DateTimeOffset]::MinValue;if(-not [DateTimeOffset]::TryParse($r.createdAt,[ref]$t)){return 'UNVERIFIED'}
+    foreach($pair in @(@('launchTokenId','tokenId'),@('launchAuthenticationId','authenticationId'),@('launchModifiedId','modifiedId'),@('postTokenId','tokenId'),@('postAuthenticationId','authenticationId'),@('postModifiedId','modifiedId'))){if($r[$pair[0]] -cne $item.first[$pair[1]]){return 'UNVERIFIED'}}
+    $a=$r.first;$b=$r.second;if($a -isnot [hashtable] -or $b -isnot [hashtable]){return 'UNVERIFIED'}
+    foreach($k in @('pid','createdAt','sid','primary','admin','elevated','standard','tokenId','authenticationId','modifiedId')){if(-not $a.ContainsKey($k) -or -not $b.ContainsKey($k) -or $a[$k] -cne $b[$k]){return 'UNVERIFIED'}}
+    if($a.pid -ne $r.pid -or $a.createdAt -cne $r.createdAt){return 'UNVERIFIED'}
+    foreach($k in @('primary','admin','elevated','standard')){if($a[$k] -isnot [bool]){return 'UNVERIFIED'}}
+    foreach($k in @('tokenId','authenticationId','modifiedId')){if($a[$k] -isnot [string] -or $a[$k] -cnotmatch '^[0-9a-f]{16}$'){return 'UNVERIFIED'}}
+    $observedSid=New-Object Security.Principal.SecurityIdentifier($a.sid);if($observedSid.Value -cne $a.sid){return 'UNVERIFIED'}
+    if($a.sid -cne $item.accountSid -or -not $a.primary -or $a.admin -or $a.elevated -or -not $a.standard){return 'FAIL'}
+    if($a.authenticationId -cne $item.first.authenticationId){return 'UNVERIFIED'}
+    return 'PASS'
+  } catch {return 'UNVERIFIED'}
+}
 # A journal item is recorded only after the real Stage 2 backend has returned.
 # Raw identity data remains in manager memory and is not written to the report.
 function Add-PhaseAActorEvidence($VerdictInput,$Journal,[string]$EvidenceClass) {
@@ -114,7 +134,12 @@ function Add-PhaseAPrimaryTokenEvidence($VerdictInput,$TokenJournal,$ActorJourna
     if(-not $first.ContainsKey('statisticsPrimary') -or -not $second.ContainsKey('statisticsPrimary') -or $first.statisticsPrimary -isnot [bool] -or $second.statisticsPrimary -isnot [bool] -or $first.statisticsPrimary -ne $second.statisticsPrimary -or $first.primary -ne $first.statisticsPrimary){$valid=$false};if(-not $valid){continue}
     $violation=($first.sid -cne $item.accountSid -or -not $first.primary -or $first.admin -or $first.elevated -or -not $first.standard)
     $state='FAIL';$reason='VIOLATION';$actorProof=''
+    $processViolation=$false;$processViolationRecord=$null
     if(-not $violation){
+      $records=if($item.ContainsKey('processObservations')){@($item.processObservations | ForEach-Object {$_})}elseif($item.ContainsKey('processObservation')){@($item.processObservation)}else{@()}
+      foreach($candidate in $records){if((Get-PhaseAProcessTokenObservation $item $candidate $source) -ceq 'FAIL'){$processViolation=$true;$processViolationRecord=$candidate;break}}
+    }
+    if(-not $violation -and -not $processViolation){
       if($item.closed -isnot [bool] -or -not $item.closed -or ($item.ContainsKey('closeResult') -and $item.closeResult -cne 'CLOSED')){continue}
       if($source -ceq 'LIVE'){foreach($event in @($ActorJournal)){if(-not $script:PhaseATrustedActorRecords.Contains($event)){$valid=$false}};if(-not $valid){continue}}
       if($actor.cases.actorSidBinding.state -cne 'PASS'){continue};$probe=@($ActorJournal|Where-Object {$_.role -ceq $role -and $_.operation -ceq 'probe'})
@@ -123,9 +148,16 @@ function Add-PhaseAPrimaryTokenEvidence($VerdictInput,$TokenJournal,$ActorJourna
       $observation=$probe[0].observation;if(-not $observation.ContainsKey('lineage') -or $observation.lineage -isnot [hashtable]){continue};$lineage=$observation.lineage
       foreach($key in @('source','role','launchTokenId','launchAuthenticationId','launchModifiedId','processTokenId','processAuthenticationId','processModifiedId','processPrimary','pid','createdAt','contained')){if(-not $lineage.ContainsKey($key)){$valid=$false}};if(-not $valid){continue}
       if($lineage.source -cne $source -or $lineage.role -cne $role -or $lineage.launchTokenId -cne $first.tokenId -or $lineage.launchAuthenticationId -cne $first.authenticationId -or $lineage.launchModifiedId -cne $first.modifiedId -or $lineage.processAuthenticationId -cne $first.authenticationId -or $lineage.processTokenId -cnotmatch '^[0-9a-f]{16}$' -or $lineage.processModifiedId -cnotmatch '^[0-9a-f]{16}$' -or $lineage.processPrimary -isnot [bool] -or -not $lineage.processPrimary -or $lineage.contained -isnot [bool] -or -not $lineage.contained -or $lineage.pid -ne $observation.expectedPid -or $lineage.createdAt -cne $observation.observedCreatedAt){continue}
+      $successProcess=$null
+      if($source -ceq 'LIVE' -or $item.ContainsKey('processObservations')){
+        if(-not $item.ContainsKey('processObservations')){continue}
+        $matching=@($item.processObservations | Where-Object {$_ -is [hashtable] -and $_.ContainsKey('pid') -and $_.ContainsKey('createdAt') -and $_.pid -eq $lineage.pid -and $_.createdAt -ceq $lineage.createdAt})
+        if($matching.Count -ne 1){continue};$successProcess=$matching[0]
+        if((Get-PhaseAProcessTokenObservation $item $successProcess $source) -cne 'PASS' -or $successProcess.first.tokenId -cne $lineage.processTokenId -or $successProcess.first.authenticationId -cne $lineage.processAuthenticationId -or $successProcess.first.modifiedId -cne $lineage.processModifiedId -or $successProcess.cleanup -cne 'PROCESS_CONFIRMED'){continue}
+      }
       $state='PASS';$reason='NONE';$actorProof=$actor.cases.actorSidBinding.proof
     }
-    $canonical=[ordered]@{control=$name;source=$source;role=$role;accountSid=$item.accountSid;observedSid=$first.sid;primary=$first.primary;admin=$first.admin;elevated=$first.elevated;standard=$first.standard;tokenId=$first.tokenId;authenticationId=$first.authenticationId;modifiedId=$first.modifiedId;handleOpen=$second.handleOpen;closed=$item.closed;actorProof=$actorProof;lineage=$(if($state -ceq 'PASS'){$lineage}else{$null});state=$state}
+    $canonical=[ordered]@{control=$name;source=$source;role=$role;accountSid=$item.accountSid;observedSid=$first.sid;primary=$first.primary;admin=$first.admin;elevated=$first.elevated;standard=$first.standard;tokenId=$first.tokenId;authenticationId=$first.authenticationId;modifiedId=$first.modifiedId;handleOpen=$second.handleOpen;closed=$item.closed;actorProof=$actorProof;lineage=$(if($state -ceq 'PASS'){$lineage}else{$null});processObservation=$(if($processViolation){$processViolationRecord}elseif($state -ceq 'PASS'){$successProcess}else{$null});state=$state}
     $sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -InputObject $canonical -Compress -Depth 5;$proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $VerdictInput.cases[$name]=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$proof}
   }
