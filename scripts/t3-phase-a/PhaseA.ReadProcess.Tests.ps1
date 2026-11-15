@@ -12,8 +12,18 @@ try {
  $fixture=@{protectedFile=$path;protectedDir=[IO.Path]::GetDirectoryName($path)};$token=@{sid=$sid}
  $mapped=Invoke-PhaseATrustedAccess $backend $fixture $token $sid 'Read' 'protectedFile' 'INJECTED'
  if($mapped.status -cne 'OBSERVED' -or $mapped.execution -cne 'PROCESS' -or $mapped.outcome -cne 'ALLOWED'){throw 'manager adapter did not use process evidence'}
- $badIdentity=$false;try{$null=Invoke-PhaseAReadPipeProcess $null 'S-1-5-21-999' $path 'protectedFile' '' $true}catch{$badIdentity=$_.Exception.GetBaseException().Message -ceq 'WITNESS_IDENTITY_REJECTED'}
- if(-not $badIdentity){throw 'wrong identity accepted'}
+  $identityOutcome='ACCEPTED'
+ try {$null=Invoke-PhaseAReadPipeProcess $null 'S-1-5-21-999' $path 'protectedFile' '' $true} catch {
+  $category=$_.Exception.GetBaseException().Message
+  if($category -ceq 'WITNESS_IDENTITY_REJECTED'){$identityOutcome='IDENTITY_REJECTED'}
+  elseif($category -cin @('WITNESS_TIMEOUT','WITNESS_CLIENT_REJECTED','WITNESS_RECEIPT_REJECTED')){$identityOutcome='IPC_OR_TIMEOUT_FAILURE'}
+  elseif($category -cin @('WITNESS_CLEANUP_FAILED','STAGE2_CHILD_UNCONFIRMED')){$identityOutcome='CLEANUP_OR_TERMINATION_FAILURE'}
+  elseif($category -cin @('WITNESS_CONTAINMENT_FAILED','WITNESS_SETUP_FAILED','WITNESS_BINARY_MISMATCH','WITNESS_SOURCE_MISMATCH','WITNESS_ARGUMENT_REJECTED')){$identityOutcome='LAUNCH_OR_SETUP_FAILURE'}
+  elseif($_.Exception.GetBaseException() -is [ComponentModel.Win32Exception]){$identityOutcome='UNEXPECTED_NATIVE_EXCEPTION'}else{$identityOutcome='UNEXPECTED_POWERSHELL_EXCEPTION'}
+ }
+ if($identityOutcome -ceq 'ACCEPTED'){throw 'WRONG_IDENTITY_ACCEPTED'}
+ if($identityOutcome -cne 'IDENTITY_REJECTED'){throw ('IDENTITY_CONTROL_'+$identityOutcome)}
+ Write-Output ('PASS identity control: '+$identityOutcome)
  $missing=Invoke-PhaseAReadPipeProcess $null $sid ($path+'.missing') 'protectedFile' '' $true
  if($missing.allowed -or $missing.error -ne 2){throw 'missing file not classified'}
  $caught=$false;try{$null=Invoke-PhaseAReadPipeProcess $null $sid $path 'protectedFile' '' $true $true}catch{$caught=$_.Exception.GetBaseException().Message -ceq 'WITNESS_TIMEOUT'}
