@@ -38,12 +38,9 @@ $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
   elseif (-not $EnableAccountStage) { "IMPLEMENTATION_INCOMPLETE" }
   else {
     try {
-      $backend=New-PhaseATokenJournalBackend (New-PhaseAWindowsAccountBackend) $tokenJournal { param($token)
-        $open= -not $token.handle.IsClosed -and -not $token.handle.IsInvalid
-        $v=[EtherPhaseAAccountNative]::Inspect($token.handle)
-        return @{sid=$v.sid;primary=$v.primary;admin=$v.admin;elevated=$v.elevated;standard=$v.standard;handleOpen=[bool]$open}
-      }
-      $launchBackend=if ($EnableActorStage) { New-PhaseAActorJournalBackend (New-PhaseAStage2Backend) $actorJournal } else { @{} }
+      $nativeBackend=New-PhaseAWindowsAccountBackend
+      $backend=New-PhaseATokenJournalBackend $nativeBackend $tokenJournal $nativeBackend.InspectToken 'LIVE'
+      $launchBackend=if ($EnableActorStage) { New-PhaseAActorJournalBackend (New-PhaseAStage2Backend) $actorJournal 'LIVE' } else { @{} }
       $fixtureBackend=if ($EnableFilesystemStage) { New-PhaseAStage3Backend } else { @{} }
       $supervisorBackend=if ($EnableActorStage) { New-PhaseAHostedSupervisorBackend } else { @{} }
       $stage=Invoke-PhaseAStages $true ([bool]$EnableActorStage) $backend $launchBackend ([bool]$EnableFilesystemStage) $fixtureBackend $stage3Result ([bool]$EnableActorStage) $supervisorBackend $hostedResult

@@ -3,6 +3,13 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
 . "$PSScriptRoot/PhaseA.HostedSupervision.ps1"
+function Test-PhaseAOwnedLaunchToken($Owner,$Account,$Stats) {
+  try {
+    if($Owner -isnot [hashtable] -or $Account -isnot [hashtable] -or $null -eq $Stats -or $Owner.role -cne $Account.role -or $Owner.accountSid -cne $Account.sid -or $Owner.inspection -cne 'OBSERVED' -or $Owner.closed -isnot [bool] -or $Owner.closed){return $false}
+    foreach($key in @('tokenId','authenticationId','modifiedId')){if($Stats.$key -isnot [string] -or $Stats.$key -cnotmatch '^[0-9a-f]{16}$' -or $Stats.$key -cne $Owner.first[$key] -or $Stats.$key -cne $Owner.second[$key]){return $false}}
+    return ($Stats.primary -is [bool] -and $Stats.primary -and $Owner.first.statisticsPrimary -is [bool] -and $Owner.first.statisticsPrimary -and $Owner.second.statisticsPrimary -is [bool] -and $Owner.second.statisticsPrimary)
+  }catch{return $false}
+}
 function Invoke-PhaseAActorOperation($Account, $Token, [hashtable]$Backend, [string]$Operation, [string]$Target, [string]$ExpectedOutcome) {
   if ($Operation -notin @('Create','Read','Overwrite','Delete','Rename') -or $ExpectedOutcome -notin @('allowed','denied') -or
       $Token.sid -cne $Account.sid) { throw 'STAGE2_OBSERVATION_REJECTED' }
@@ -66,7 +73,7 @@ function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashta
   return $stage
 }
 function New-PhaseAStage2Backend {
-  return @{ Run={ param($account,$token,$operation,$operationTarget)
+  $backend=@{ Run={ param($account,$token,$operation,$operationTarget)
     $common=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     if ([string]::IsNullOrWhiteSpace($common)) { throw 'stage directory unavailable' }
     $parent=[IO.Path]::GetFullPath($common).TrimEnd('\')
@@ -76,7 +83,7 @@ function New-PhaseAStage2Backend {
     if ([string]::IsNullOrEmpty($operation)) { $operation='Create' }
     if ($operation -notin @('Create','Read','Overwrite','Delete','Rename')) { throw 'invalid operation' }
     if ([string]::IsNullOrEmpty($operationTarget)) { $operationTarget=$target }
-    $job=[IntPtr]::Zero; $child=$null; $process=$null; $safeToRemove=$true; $cleanupFailed=$false; $createdRoot=$false
+    $job=[IntPtr]::Zero; $child=$null; $process=$null; $safeToRemove=$true; $cleanupFailed=$false; $createdRoot=$false; $tokenRef=$false; $launchHandle=$null
     try {
       $null=New-Item -ItemType Directory -Path $root -ErrorAction Stop; $createdRoot=$true
       $item=Get-Item -LiteralPath $root -Force -ErrorAction Stop
@@ -94,12 +101,20 @@ function New-PhaseAStage2Backend {
       foreach ($path in @($actor,$ready,$gate,$result,$operationTarget,$exe,$root)) { if ($path.Contains('"')) { throw 'unsafe path' } }
       $cmd='"'+$exe+'" -NoProfile -NonInteractive -File "'+$actor+'" -Operation '+$operation+' -Target "'+$operationTarget+'" -Ready "'+$ready+'" -Gate "'+$gate+'" -Result "'+$result+'" -Nonce '+$nonce
       $job=[EtherPhaseAJob]::Create()
-      $child=[EtherPhaseAAtomic]::CreateWithTokenInDirectory($token.handle.DangerousGetHandle(),$job,$exe,$cmd,$root)
+      if(-not (Get-Variable -Name PhaseATokenOwners -Scope Script -ErrorAction SilentlyContinue) -or -not $script:PhaseATokenOwners.ContainsKey($token)){throw 'STAGE2_OBSERVATION_REJECTED'}
+      $owner=$script:PhaseATokenOwners[$token]
+      $launchHandle=$token.handle;$launchHandle.DangerousAddRef([ref]$tokenRef);$tokenPointer=$launchHandle.DangerousGetHandle()
+      try{$beforeLaunch=[EtherPhaseANative]::InspectTokenHandle($tokenPointer)}catch{$owner.launchFailure='TOKEN_STATISTICS_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
+      if(-not (Test-PhaseAOwnedLaunchToken $owner $account $beforeLaunch)){$owner.launchFailure='TOKEN_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}
+      $child=[EtherPhaseAAtomic]::CreateWithTokenInDirectory($tokenPointer,$job,$exe,$cmd,$root)
       $safeToRemove=$false
       if (-not $child.InJob() -or $child.Exited()) { throw 'child not contained or already exited' }
       $process=Get-Process -Id $child.Pid -ErrorAction Stop
-      $observed=Get-PhaseAProcessToken $process
+      try{$observed=Get-PhaseAProcessToken $process $true}catch{if($_.Exception.GetBaseException().Message -ceq 'TOKEN_INSPECTION_CLOSE_FAILED'){$owner.launchFailure='PROCESS_TOKEN_CLOSE_FAILED';throw 'STAGE2_CLEANUP_FAILED'};$owner.launchFailure='PROCESS_OBSERVATION_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
       if ($observed.pid -ne $child.Pid -or $observed.sid -cne $account.sid -or $observed.admin -or $observed.elevated -or -not $observed.standard) { throw 'STAGE2_OBSERVATION_REJECTED' }
+      try{$afterLaunch=[EtherPhaseANative]::InspectTokenHandle($tokenPointer)}catch{$owner.launchFailure='TOKEN_STATISTICS_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
+      foreach($key in @('tokenId','authenticationId','modifiedId')){if($afterLaunch.$key -cne $beforeLaunch.$key){$owner.launchFailure='TOKEN_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}}
+      if(-not $observed.primary -or $observed.authenticationId -cne $beforeLaunch.authenticationId){$owner.launchFailure='PROCESS_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}
       $child.Resume()
       $deadline=[DateTime]::UtcNow.AddSeconds(20)
       while (-not [IO.File]::Exists($ready)) {
@@ -122,11 +137,13 @@ function New-PhaseAStage2Backend {
         expectedPid=$child.Pid; reportedPid=$final.pid; tokenNonAdmin=$true; tokenObserved=$true;
         createdAt=$final.createdAt; observedCreatedAt=$observed.createdAt; expectedNonce=$nonce;
         reportedNonce=$final.nonce; exitCode=$code; outcome=$final.outcome; contained=$true; terminated=$true }
+      $obs.lineage=@{source='LIVE';role=$account.role;launchTokenId=$beforeLaunch.tokenId;launchAuthenticationId=$beforeLaunch.authenticationId;launchModifiedId=$beforeLaunch.modifiedId;processTokenId=$observed.tokenId;processAuthenticationId=$observed.authenticationId;processModifiedId=$observed.modifiedId;processPrimary=$observed.primary;pid=$observed.pid;createdAt=$observed.createdAt;contained=$true}
       if ($final.PSObject.Properties.Name -contains 'digest') { $obs.digest=$final.digest }
       if ($final.PSObject.Properties.Name -contains 'errorCategory' -and $final.errorCategory -cin @('NONE','ACCESS_DENIED','FILE_NOT_FOUND','PATH_NOT_FOUND','INVALID_PATH','IO_ERROR','OTHER')) { $obs.errorCategory=$final.errorCategory }
       if ($final.PSObject.Properties.Name -contains 'errorCode' -and $final.errorCode -is [int] -and $final.errorCode -ge 0 -and $final.errorCode -le 65535) { $obs.errorCode=$final.errorCode }
       return $obs
     } finally {
+      if($tokenRef){try{$launchHandle.DangerousRelease()}catch{$cleanupFailed=$true}}
       if ($job -ne [IntPtr]::Zero) { try { [EtherPhaseAJob]::Close($job) } catch { $cleanupFailed=$true } }
       if ($child) {
         try {
@@ -156,6 +173,9 @@ function New-PhaseAStage2Backend {
       if ($cleanupFailed) { throw 'STAGE2_CLEANUP_FAILED' }
     }
   } }
+  if(-not (Get-Variable -Name PhaseATrustedActorBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
+  $script:PhaseATrustedActorBackends.Add($backend,$backend.Run)
+  return $backend
 }
 function Invoke-PhaseAAdversarialControls {
   $base=@{role='legacy';expectedSid='S-1-5-21-1';observedSid='S-1-5-21-1';reportedSid='S-1-5-21-1';expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='synthetic-nonce';reportedNonce='synthetic-nonce';exitCode=20;outcome='denied';contained=$true;terminated=$true}

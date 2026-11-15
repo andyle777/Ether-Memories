@@ -324,6 +324,7 @@ $tokenJournal=@(
   @{role='broker';accountSid='S-1-5-21-1';first=@{sid='S-1-5-21-1';primary=$true;admin=$false;elevated=$false;standard=$true};second=@{sid='S-1-5-21-1';primary=$true;admin=$false;elevated=$false;standard=$true;handleOpen=$true};closed=$true},
   @{role='legacy';accountSid='S-1-5-21-2';first=@{sid='S-1-5-21-2';primary=$true;admin=$false;elevated=$false;standard=$true};second=@{sid='S-1-5-21-2';primary=$true;admin=$false;elevated=$false;standard=$true;handleOpen=$true};closed=$true}
 )
+foreach($i in 0,1){$role=@('broker','legacy')[$i];$id=@('0000000000000001','0000000000000002')[$i];foreach($sample in @($tokenJournal[$i].first,$tokenJournal[$i].second)){$sample.tokenId=$id;$sample.authenticationId='0000000000000010';$sample.modifiedId='0000000000000020';$sample.statisticsPrimary=$true};$probe=@($journal.ToArray()|Where-Object{$_.role -ceq $role -and $_.operation -ceq 'probe'})[0];$o=$probe.observation;$o.lineage=@{source='INJECTED';role=$role;launchTokenId=$id;launchAuthenticationId='0000000000000010';launchModifiedId='0000000000000020';processTokenId='0000000000000030';processAuthenticationId='0000000000000010';processModifiedId='0000000000000020';processPrimary=$true;pid=$o.expectedPid;createdAt=$o.observedCreatedAt;contained=$true}}
 $tokenCandidate=New-PhaseAManagerVerdictInput ('1'*40) '123'
 if (-not (Get-Command Add-PhaseAPrimaryTokenEvidence -ErrorAction SilentlyContinue)) { throw 'Primary-token evidence adapter is missing' }
 Add-PhaseAPrimaryTokenEvidence $tokenCandidate $tokenJournal $journal.ToArray() 'SIMULATED_PASS'

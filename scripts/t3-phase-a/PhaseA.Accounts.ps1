@@ -116,7 +116,7 @@ public static class EtherPhaseAAccountNative {
 }
 '@
   }
-  return @{
+  $backend=@{
     Create={ param($role)
       $name='oa'+[Guid]::NewGuid().ToString('N').Substring(0,16)
       $description='ether-phase-a-'+[Guid]::NewGuid().ToString('N')
@@ -155,6 +155,12 @@ public static class EtherPhaseAAccountNative {
       try { return [EtherPhaseAAccountNative]::Authenticate($account.name,$account.secret) }
       finally { $account.secret.Dispose() }
     }
+    InspectToken={param($token)
+      $open= -not $token.handle.IsClosed -and -not $token.handle.IsInvalid
+      $v=[EtherPhaseAAccountNative]::Inspect($token.handle)
+      $s=[EtherPhaseANative]::InspectTokenHandle($token.handle.DangerousGetHandle())
+      return @{sid=$v.sid;primary=$v.primary;admin=$v.admin;elevated=$v.elevated;standard=$v.standard;handleOpen=[bool]$open;tokenId=$s.tokenId;authenticationId=$s.authenticationId;modifiedId=$s.modifiedId;statisticsPrimary=$s.primary}
+    }
     Close={ param($token)
       try { if (-not $token.handle.CloseChecked()) { throw 'token handle cleanup failed' } }
       finally { $token.handle.Dispose() }
@@ -170,4 +176,7 @@ public static class EtherPhaseAAccountNative {
       } finally { $account.secret.Dispose() }
     }
   }
+  if(-not (Get-Variable -Name PhaseATrustedAccountBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedAccountBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
+  $script:PhaseATrustedAccountBackends.Add($backend,@{authenticate=$backend.Authenticate;close=$backend.Close;inspect=$backend.InspectToken})
+  return $backend
 }

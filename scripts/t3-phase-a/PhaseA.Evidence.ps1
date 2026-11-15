@@ -6,6 +6,11 @@ function Test-PhaseAReadWitnessCleanup($Record,[string]$Source) {
  return ($Record.ContainsKey('reverted') -and $Record.reverted -is [bool] -and $Record.reverted)
 }
 Set-StrictMode -Version Latest
+if(-not (Get-Variable -Name PhaseATrustedAccountBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedAccountBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
+if(-not (Get-Variable -Name PhaseATrustedTokenRecords -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedTokenRecords=New-Object 'System.Collections.Generic.HashSet[object]'}
+if(-not (Get-Variable -Name PhaseATokenOwners -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATokenOwners=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
+if(-not (Get-Variable -Name PhaseATrustedActorBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
+if(-not (Get-Variable -Name PhaseATrustedActorRecords -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorRecords=New-Object 'System.Collections.Generic.HashSet[object]'}
 # A journal item is recorded only after the real Stage 2 backend has returned.
 # Raw identity data remains in manager memory and is not written to the report.
 function Add-PhaseAActorEvidence($VerdictInput,$Journal,[string]$EvidenceClass) {
@@ -46,15 +51,17 @@ function Add-PhaseAActorEvidence($VerdictInput,$Journal,[string]$EvidenceClass) 
     }
   } finally { $sha.Dispose() }
 }
-function New-PhaseAActorJournalBackend([hashtable]$Backend,[Collections.Generic.List[object]]$Journal) {
+function New-PhaseAActorJournalBackend([hashtable]$Backend,[Collections.Generic.List[object]]$Journal,[ValidateSet('LIVE','INJECTED')][string]$Source='INJECTED') {
   if (-not $Backend.ContainsKey('Run') -or $Backend.Run -isnot [scriptblock] -or $null -eq $Journal) { throw 'ACTOR_JOURNAL_INVALID' }
+  if($Source -ceq 'LIVE' -and (-not $script:PhaseATrustedActorBackends.ContainsKey($Backend) -or -not [object]::ReferenceEquals($script:PhaseATrustedActorBackends[$Backend],$Backend.Run))){throw 'ACTOR_SOURCE_REJECTED'}
   $run=$Backend.Run
   $wrapped={
     param($account,$token,$operation,$target)
     $value=& $run $account $token $operation $target
     if ($value -is [hashtable]) {
       $kind=if ([string]::IsNullOrEmpty($operation)) {'probe'} else {$operation}
-      $Journal.Add(@{role=$account.role;operation=$kind;accountSid=$account.sid;tokenSid=$token.sid;observation=$value})
+      $item=@{role=$account.role;operation=$kind;accountSid=$account.sid;tokenSid=$token.sid;observation=$value};$Journal.Add($item)
+      if($Source -ceq 'LIVE'){$null=$script:PhaseATrustedActorRecords.Add($item)}
     }
     return $value
   }.GetNewClosure()
@@ -87,53 +94,73 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
 }
 function Add-PhaseAPrimaryTokenEvidence($VerdictInput,$TokenJournal,$ActorJournal,[string]$EvidenceClass) {
   if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS')) { return }
-  $items=@($TokenJournal); if ($items.Count -ne 2) { return }
-  $actor=New-PhaseAManagerVerdictInput $VerdictInput.commit $VerdictInput.runId
-  Add-PhaseAActorEvidence $actor $ActorJournal $EvidenceClass
-  if ($actor.cases.actorSidBinding.state -cne 'PASS') { return }
-  $canonical=New-Object 'System.Collections.Generic.List[object]'
-  foreach ($i in 0,1) {
-    $item=$items[$i]; $role=@('broker','legacy')[$i]
-    if ($item -isnot [hashtable]) { return }
-    foreach ($key in @('role','accountSid','first','second','closed')) { if (-not $item.ContainsKey($key)) { return } }
-    if ($item.role -cne $role -or $item.closed -isnot [bool] -or -not $item.closed -or $item.first -isnot [hashtable] -or $item.second -isnot [hashtable]) { return }
-    $first=$item.first; $second=$item.second
-    foreach ($sample in @($first,$second)) { foreach ($key in @('sid','primary','admin','elevated','standard')) { if (-not $sample.ContainsKey($key)) { return } } }
-    if (-not $second.ContainsKey('handleOpen')) { return }
-    if ($item.accountSid -isnot [string] -or [string]::IsNullOrWhiteSpace($item.accountSid) -or $first.sid -cne $item.accountSid -or $second.sid -cne $item.accountSid -or $second.handleOpen -isnot [bool] -or -not $second.handleOpen) { return }
-    foreach ($sample in @($first,$second)) {
-      if ($sample.primary -isnot [bool] -or -not $sample.primary -or $sample.admin -isnot [bool] -or $sample.admin -or $sample.elevated -isnot [bool] -or $sample.elevated -or $sample.standard -isnot [bool] -or -not $sample.standard) { return }
+  $source=if($EvidenceClass -ceq 'LIVE_OBSERVED'){'LIVE'}else{'INJECTED'}
+  $items=@($TokenJournal);if($items.Count -gt 2){return}
+  $actor=New-PhaseAManagerVerdictInput $VerdictInput.commit $VerdictInput.runId;Add-PhaseAActorEvidence $actor $ActorJournal $EvidenceClass
+  foreach($role in @('broker','legacy')) {
+    $name=$role+'PrimaryToken';if($VerdictInput.cases[$name].state -cne 'NOT_RUN'){continue}
+    $matched=@($items | Where-Object {$_ -is [hashtable] -and $_.ContainsKey('role') -and $_.role -ceq $role});if($matched.Count -ne 1){continue};$item=$matched[0]
+    if($source -ceq 'LIVE' -and -not $script:PhaseATrustedTokenRecords.Contains($item)){continue}
+    if($item.ContainsKey('source')){if($item.source -cne $source){continue}}elseif($source -ceq 'LIVE'){continue}
+    $present=$true;foreach($key in @('accountSid','first','second','closed')){if(-not $item.ContainsKey($key)){$present=$false}};if(-not $present){continue}
+    if($item.accountSid -isnot [string] -or [string]::IsNullOrWhiteSpace($item.accountSid) -or $item.first -isnot [hashtable] -or $item.second -isnot [hashtable] -or $item.closed -isnot [bool]){continue}
+    if($item.ContainsKey('inspection') -and $item.inspection -cne 'OBSERVED'){continue}
+    $first=$item.first;$second=$item.second;$keys=@('sid','primary','admin','elevated','standard');$valid=$true
+    foreach($key in $keys){if(-not $first.ContainsKey($key) -or -not $second.ContainsKey($key) -or $first[$key] -cne $second[$key]){$valid=$false}}
+    if(-not $valid -or $first.sid -isnot [string] -or [string]::IsNullOrWhiteSpace($first.sid) -or -not $second.ContainsKey('handleOpen') -or $second.handleOpen -isnot [bool] -or -not $second.handleOpen){continue}
+    try{$expectedSid=New-Object Security.Principal.SecurityIdentifier($item.accountSid);$observedSid=New-Object Security.Principal.SecurityIdentifier($first.sid);if($expectedSid.Value -cne $item.accountSid -or $observedSid.Value -cne $first.sid){continue}}catch{continue}
+    foreach($key in @('primary','admin','elevated','standard')){if($first[$key] -isnot [bool] -or $second[$key] -isnot [bool]){$valid=$false}};if(-not $valid){continue}
+    foreach($key in @('tokenId','authenticationId','modifiedId')){if(-not $first.ContainsKey($key) -or -not $second.ContainsKey($key) -or $first[$key] -isnot [string] -or $first[$key] -cnotmatch '^[0-9a-f]{16}$' -or $first[$key] -cne $second[$key]){$valid=$false}}
+    if(-not $first.ContainsKey('statisticsPrimary') -or -not $second.ContainsKey('statisticsPrimary') -or $first.statisticsPrimary -isnot [bool] -or $second.statisticsPrimary -isnot [bool] -or $first.statisticsPrimary -ne $second.statisticsPrimary -or $first.primary -ne $first.statisticsPrimary){$valid=$false};if(-not $valid){continue}
+    $violation=($first.sid -cne $item.accountSid -or -not $first.primary -or $first.admin -or $first.elevated -or -not $first.standard)
+    $state='FAIL';$reason='VIOLATION';$actorProof=''
+    if(-not $violation){
+      if($item.closed -isnot [bool] -or -not $item.closed -or ($item.ContainsKey('closeResult') -and $item.closeResult -cne 'CLOSED')){continue}
+      if($source -ceq 'LIVE'){foreach($event in @($ActorJournal)){if(-not $script:PhaseATrustedActorRecords.Contains($event)){$valid=$false}};if(-not $valid){continue}}
+      if($actor.cases.actorSidBinding.state -cne 'PASS'){continue};$probe=@($ActorJournal|Where-Object {$_.role -ceq $role -and $_.operation -ceq 'probe'})
+      if($probe.Count -ne 1 -or $probe[0].accountSid -cne $item.accountSid -or $probe[0].tokenSid -cne $item.accountSid){continue}
+      if($source -ceq 'LIVE' -and -not $script:PhaseATrustedActorRecords.Contains($probe[0])){continue}
+      $observation=$probe[0].observation;if(-not $observation.ContainsKey('lineage') -or $observation.lineage -isnot [hashtable]){continue};$lineage=$observation.lineage
+      foreach($key in @('source','role','launchTokenId','launchAuthenticationId','launchModifiedId','processTokenId','processAuthenticationId','processModifiedId','processPrimary','pid','createdAt','contained')){if(-not $lineage.ContainsKey($key)){$valid=$false}};if(-not $valid){continue}
+      if($lineage.source -cne $source -or $lineage.role -cne $role -or $lineage.launchTokenId -cne $first.tokenId -or $lineage.launchAuthenticationId -cne $first.authenticationId -or $lineage.launchModifiedId -cne $first.modifiedId -or $lineage.processAuthenticationId -cne $first.authenticationId -or $lineage.processTokenId -cnotmatch '^[0-9a-f]{16}$' -or $lineage.processModifiedId -cnotmatch '^[0-9a-f]{16}$' -or $lineage.processPrimary -isnot [bool] -or -not $lineage.processPrimary -or $lineage.contained -isnot [bool] -or -not $lineage.contained -or $lineage.pid -ne $observation.expectedPid -or $lineage.createdAt -cne $observation.observedCreatedAt){continue}
+      $state='PASS';$reason='NONE';$actorProof=$actor.cases.actorSidBinding.proof
     }
-    $probe=@($ActorJournal | Where-Object { $_.role -ceq $role -and $_.operation -ceq 'probe' })
-    if ($probe.Count -ne 1 -or $probe[0].accountSid -cne $item.accountSid) { return }
-    $canonical.Add([ordered]@{role=$role;sid=$item.accountSid;primary=$second.primary;admin=$second.admin;elevated=$second.elevated;standard=$second.standard;handleOpen=$second.handleOpen;closed=$item.closed;actorProof=$actor.cases.actorSidBinding.proof})
+    $canonical=[ordered]@{control=$name;source=$source;role=$role;accountSid=$item.accountSid;observedSid=$first.sid;primary=$first.primary;admin=$first.admin;elevated=$first.elevated;standard=$first.standard;tokenId=$first.tokenId;authenticationId=$first.authenticationId;modifiedId=$first.modifiedId;handleOpen=$second.handleOpen;closed=$item.closed;actorProof=$actorProof;lineage=$(if($state -ceq 'PASS'){$lineage}else{$null});state=$state}
+    $sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -InputObject $canonical -Compress -Depth 5;$proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    $VerdictInput.cases[$name]=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$proof}
   }
-  $json=ConvertTo-Json -InputObject @($canonical.ToArray()) -Compress -Depth 5
-  $sha=[Security.Cryptography.SHA256]::Create()
-  try { foreach ($name in @('brokerPrimaryToken','legacyPrimaryToken')) {
-    if ($VerdictInput.cases[$name].state -cne 'NOT_RUN') { return }
-    $proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($name+"`n"+$json))).Replace('-','').ToLowerInvariant()
-    $VerdictInput.cases[$name]=@{state='PASS';evidence=$EvidenceClass;reason='NONE';proof=$proof}
-  } } finally { $sha.Dispose() }
 }
-function New-PhaseATokenJournalBackend([hashtable]$Backend,[Collections.Generic.List[object]]$Journal,[scriptblock]$Inspect) {
+function New-PhaseATokenJournalBackend([hashtable]$Backend,[Collections.Generic.List[object]]$Journal,[scriptblock]$Inspect,[ValidateSet('LIVE','INJECTED')][string]$Source='INJECTED') {
   if ($null -eq $Inspect -or $null -eq $Journal) { throw 'TOKEN_JOURNAL_INVALID' }
-  $wrapped=$Backend.Clone(); $authenticate=$Backend.Authenticate; $close=$Backend.Close
+  if($Source -ceq 'LIVE'){
+    if(-not $script:PhaseATrustedAccountBackends.ContainsKey($Backend)){throw 'TOKEN_SOURCE_REJECTED'}
+    $origin=$script:PhaseATrustedAccountBackends[$Backend]
+    if(-not [object]::ReferenceEquals($origin.authenticate,$Backend.Authenticate) -or -not [object]::ReferenceEquals($origin.close,$Backend.Close) -or -not [object]::ReferenceEquals($origin.inspect,$Backend.InspectToken) -or -not [object]::ReferenceEquals($origin.inspect,$Inspect)){throw 'TOKEN_SOURCE_REJECTED'}
+  }
+  $wrapped=$Backend.Clone(); $authenticate=$Backend.Authenticate; $close=$Backend.Close;$owners=New-Object 'System.Collections.Generic.List[object]'
   $wrapped.Authenticate={ param($account)
     $token=& $authenticate $account
+    $entry=$null
     try {
-      $first=@{sid=[string]$token.sid;primary=[bool]$token.primary;admin=[bool]$token.admin;elevated=[bool]$token.elevated;standard=[bool]$token.standard}
+      $first=@{sid=$token.sid;primary=$token.primary;admin=$token.admin;elevated=$token.elevated;standard=$token.standard}
+      if($Source -ceq 'INJECTED' -and $token -is [hashtable]){foreach($key in @('tokenId','authenticationId','modifiedId','statisticsPrimary')){if($token.ContainsKey($key)){$first[$key]=$token[$key]}}}
+      $entry=@{role=$account.role;accountSid=$account.sid;source=$Source;first=$first;second=$null;inspection='FAILED';failure='STATISTICS_QUERY_FAILED';launchFailure='NONE';closed=$false;closeResult='NOT_ATTEMPTED'};$Journal.Add($entry);$owners.Add(@{token=$token;entry=$entry})
+      if($Source -ceq 'LIVE'){$null=$script:PhaseATrustedTokenRecords.Add($entry);$script:PhaseATokenOwners.Add($token,$entry)}
+      if($Source -ceq 'LIVE'){$stats=[EtherPhaseANative]::InspectTokenHandle($token.handle.DangerousGetHandle());$first.tokenId=$stats.tokenId;$first.authenticationId=$stats.authenticationId;$first.modifiedId=$stats.modifiedId;$first.statisticsPrimary=$stats.primary}
+      $entry.failure='INSPECTION_FAILED'
       $observation=& $Inspect $token
       if ($observation -isnot [hashtable]) { throw 'TOKEN_INSPECTION_FAILED' }
-      $Journal.Add(@{role=$account.role;accountSid=$account.sid;first=$first;second=$observation;closed=$false})
+      $required=@('sid','primary','admin','elevated','standard','handleOpen');if($Source -ceq 'LIVE'){$required+=@('tokenId','authenticationId','modifiedId','statisticsPrimary')}
+      if($Source -ceq 'INJECTED'){foreach($key in @('tokenId','authenticationId','modifiedId','statisticsPrimary')){if($observation.ContainsKey($key)){$required+=$key}}}
+      $bounded=@{};foreach($key in $required){if(-not $observation.ContainsKey($key)){throw 'TOKEN_INSPECTION_FAILED'};$bounded[$key]=$observation[$key]}
+      $entry.second=$bounded;$entry.inspection='OBSERVED';$entry.failure='NONE'
       return $token
-    } catch { try { $null=& $close $token } catch { throw 'ACCOUNT_CLEANUP_FAILED' }; throw }
+    } catch { try { $null=& $close $token; if($entry){$entry.closed=$true;$entry.closeResult='CLOSED'} } catch { if($entry){$entry.closeResult='FAILED'};throw 'ACCOUNT_CLEANUP_FAILED' } finally {if($Source -ceq 'LIVE'){$null=$script:PhaseATokenOwners.Remove($token)}}; throw }
   }.GetNewClosure()
   $wrapped.Close={ param($token)
-    $null=& $close $token
-    $matches=@($Journal | Where-Object { $_.accountSid -ceq $token.sid })
+    $matches=@($owners | Where-Object { [object]::ReferenceEquals($_.token,$token) })
     if ($matches.Count -ne 1) { throw 'ACCOUNT_CLEANUP_FAILED' }
-    $matches[0].closed=$true
+    try{$null=& $close $token;$matches[0].entry.closed=$true;$matches[0].entry.closeResult='CLOSED'}catch{$matches[0].entry.closeResult='FAILED';throw}finally{if($Source -ceq 'LIVE'){$null=$script:PhaseATokenOwners.Remove($token)}}
   }.GetNewClosure()
   return $wrapped
 }

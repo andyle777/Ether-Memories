@@ -310,7 +310,7 @@ $script:events.Clear(); $script:seq=0
 $tokenJournal=New-Object 'System.Collections.Generic.List[object]'
 $wrappedAccount=New-PhaseATokenJournalBackend $fake $tokenJournal { param($token) throw 'inspection failed' }
 $r=Invoke-PhaseAStages $true $true $wrappedAccount $stage2fake
-if ($r -cne 'ACCOUNT_AUTHENTICATION_FAILED' -or -not $script:events.Contains('close:broker') -or $tokenJournal.Count -ne 0) { throw 'Failed inspection leaked token or recorded proof' }
+if ($r -cne 'ACCOUNT_AUTHENTICATION_FAILED' -or -not $script:events.Contains('close:broker') -or $tokenJournal.Count -ne 1 -or $tokenJournal[0].inspection -cne 'FAILED' -or -not $tokenJournal[0].closed) { throw 'Failed inspection did not retain failure or leaked token' }
 Write-Output 'PASS manager-connected token inspection and failure cleanup (2)'
 $script:events.Clear(); $script:seq=0
 $tokenJournal=New-Object 'System.Collections.Generic.List[object]'

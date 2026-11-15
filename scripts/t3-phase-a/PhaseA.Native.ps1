@@ -6,10 +6,14 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 public static class EtherPhaseANative {
+    [StructLayout(LayoutKind.Sequential)] public struct Luid { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)] public struct TokenStatistics { public Luid TokenId,AuthenticationId; public long Expiration; public int TokenType,ImpersonationLevel; public uint Charged,Available,Groups,Privileges; public Luid ModifiedId; }
     [DllImport("advapi32.dll", SetLastError=true)]
     private static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
     [DllImport("advapi32.dll", SetLastError=true)]
     private static extern bool GetTokenInformation(IntPtr token, int kind, out int value, int length, out int returned);
+    [DllImport("advapi32.dll", SetLastError=true, EntryPoint="GetTokenInformation")]
+    private static extern bool GetTokenStatistics(IntPtr token, int kind, out TokenStatistics value, int length, out int returned);
     [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool CloseHandle(IntPtr handle);
     public sealed class TokenRecord {
@@ -19,8 +23,17 @@ public static class EtherPhaseANative {
         public bool elevated;
         public bool standard;
         public string createdAt;
+        public string tokenId, authenticationId, modifiedId;
+        public bool primary;
     }
-    public static TokenRecord Inspect(Process process) {
+    static string Format(Luid v) { return unchecked((uint)v.High).ToString("x8")+v.Low.ToString("x8"); }
+    public static TokenRecord InspectTokenHandle(IntPtr token) {
+        TokenStatistics stats; int returned;
+        if(token==IntPtr.Zero || !GetTokenStatistics(token,10,out stats,Marshal.SizeOf(typeof(TokenStatistics)),out returned)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return new TokenRecord {tokenId=Format(stats.TokenId),authenticationId=Format(stats.AuthenticationId),modifiedId=Format(stats.ModifiedId),primary=stats.TokenType==1};
+    }
+    public static TokenRecord Inspect(Process process) { return Inspect(process,false); }
+    public static TokenRecord Inspect(Process process, bool requireClose) {
         if (process.HasExited) throw new InvalidOperationException("Process exited");
         IntPtr token;
         if (!OpenProcessToken(process.Handle, 0x0008, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -34,16 +47,16 @@ public static class EtherPhaseANative {
                     if (String.Equals(group.Value, "S-1-5-32-545", StringComparison.Ordinal)) standard = true;
                 }
                 if (process.HasExited) throw new InvalidOperationException("Process exited");
-                return new TokenRecord { pid=process.Id, sid=identity.User.Value, admin=admin,
-                    elevated=elevation != 0, standard=standard, createdAt=process.StartTime.ToUniversalTime().ToString("o") };
+                TokenRecord record=InspectTokenHandle(token); record.pid=process.Id;record.sid=identity.User.Value;record.admin=admin;
+                record.elevated=elevation != 0;record.standard=standard;record.createdAt=process.StartTime.ToUniversalTime().ToString("o");return record;
             }
-        } finally { CloseHandle(token); }
+        } finally { if(!CloseHandle(token) && requireClose) throw new InvalidOperationException("TOKEN_INSPECTION_CLOSE_FAILED"); }
     }
 }
 "@
 }
-function Get-PhaseAProcessToken([Diagnostics.Process]$Process) {
-  return [EtherPhaseANative]::Inspect($Process)
+function Get-PhaseAProcessToken([Diagnostics.Process]$Process,[bool]$RequireClose=$false) {
+  return [EtherPhaseANative]::Inspect($Process,$RequireClose)
 }
 if (-not ("EtherPhaseAJob" -as [type])) {
   Add-Type -TypeDefinition @"
