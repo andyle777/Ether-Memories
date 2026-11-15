@@ -136,13 +136,53 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
     elseif ($base -ceq 'STAGE3_ACL_REJECTED') { $status='STAGE3_ACL_REJECTED' }
     elseif ($base -ceq 'STAGE3_CLEANUP_FAILED') { $status='STAGE3_CLEANUP_FAILED' }
   } finally {
+    if ($null -ne $fixture -and $FixtureBackend.ContainsKey('CleanupObservation')) {
+      $evidence['fixtureCleanup']=@{fixtureId='';rootIdentity='';parentIdentity='';identityAssurance='PATH_ONLY';expected=@('.','protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin');authorized=(-not $unconfirmed);attempted=$false;returned=$false;reason=$(if($unconfirmed){'CHILD_UNCONFIRMED'}else{'NOT_ATTEMPTED'});before=$null;after=$null}
+      try {$evidence.fixtureCleanup.rootIdentity=[IO.Path]::GetFullPath($fixture.root).TrimEnd('\');$evidence.fixtureCleanup.parentIdentity=[IO.Path]::GetFullPath($fixture.parent).TrimEnd('\');$evidence.fixtureCleanup.fixtureId=[IO.Path]::GetFileName($evidence.fixtureCleanup.rootIdentity)} catch {}
+    }
     if ($null -ne $fixture -and -not $unconfirmed) {
-      try { $null=& $FixtureBackend.Cleanup $fixture; $cases.fixtureCleanup=$true; if ($FixtureBackend.ContainsKey('CleanupVerified')) { $evidence.cleanupVerified=(& $FixtureBackend.CleanupVerified $fixture) -ceq $true } } catch { $status='STAGE3_CLEANUP_FAILED' }
+      try {
+        if ($evidence.ContainsKey('fixtureCleanup')) {
+          $cleanup=$evidence.fixtureCleanup;$cleanup.before=& $FixtureBackend.CleanupObservation $fixture 'BEFORE'
+          if ($cleanup.before.status -cne 'OBSERVED' -or -not $cleanup.before.rootExists) { $cleanup.reason='PRECHECK_FAILED'; throw 'STAGE3_CLEANUP_FAILED' }
+          $cleanup.attempted=$true
+        }
+        $null=& $FixtureBackend.Cleanup $fixture
+        if ($evidence.ContainsKey('fixtureCleanup')) { $cleanup.returned=$true;$cleanup.reason='NONE' }
+        $cases.fixtureCleanup=$true
+        if ($FixtureBackend.ContainsKey('CleanupVerified')) { $evidence.cleanupVerified=(& $FixtureBackend.CleanupVerified $fixture) -ceq $true }
+      } catch { if($evidence.ContainsKey('fixtureCleanup') -and $cleanup.attempted){$cleanup.reason='CLEANUP_FAILED'}; $status='STAGE3_CLEANUP_FAILED' }
+      finally {
+        if ($evidence.ContainsKey('fixtureCleanup') -and $cleanup.attempted) {
+          try { $cleanup.after=& $FixtureBackend.CleanupObservation $fixture 'AFTER';if($cleanup.after.status -cne 'OBSERVED' -or $cleanup.after.rootExists -or $cleanup.after.existing.Count -ne 0){$evidence.cleanupVerified=$false;$cases.fixtureCleanup=$false;$status='STAGE3_CLEANUP_FAILED'} } catch { $cleanup.after=$null;$evidence.cleanupVerified=$false;$cases.fixtureCleanup=$false;$status='STAGE3_CLEANUP_FAILED' }
+        }
+      }
     }
   }
   if ($unconfirmed) { throw 'STAGE2_CHILD_UNCONFIRMED' }
   if ($status -ceq 'STAGE3_COMPLETE' -and @($cases.Values | Where-Object { $_ -isnot [bool] -or -not $_ }).Count -ne 0) { $status='STAGE3_CASE_FAILED' }
   return @{status=$status;cases=$cases;evidence=$evidence}
+}
+function Get-PhaseAFixtureCleanupObservation($Fixture,[string]$Phase,[string]$Source) {
+  $result=@{status='UNVERIFIED';reason='OBSERVATION_FAILED';phase=$Phase;source=$Source;fixtureId='';rootIdentity='';parentIdentity='';identityAssurance='PATH_ONLY';rootExists=$false;existing=@();unexpected=0}
+  try {
+    if($Fixture -isnot [hashtable] -or $Phase -cnotin @('BEFORE','AFTER') -or $Source -cnotin @('LIVE','INJECTED')){return $result}
+    $root=[IO.Path]::GetFullPath($Fixture.root).TrimEnd('\');$parent=[IO.Path]::GetFullPath($Fixture.parent).TrimEnd('\');$id=[IO.Path]::GetFileName($root)
+    if($id -cnotmatch '^ether-phase-a-store-[0-9a-f]{32}$' -or [IO.Path]::GetDirectoryName($root) -cne $parent){return $result}
+    if($Source -ceq 'LIVE' -and $parent -cne [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)).TrimEnd('\')){return $result}
+    $expected=[ordered]@{root='.';protectedDir='protected';controlDir='control';protectedFile='protected/original.bin';newFile='protected/committed.bin';deniedFile='protected/rejected.bin';controlFile='control/original.bin';authorizedProbeFile='protected/witness-authorized.bin';controlProbeFile='control/witness-permissive.bin'}
+    foreach($key in $expected.Keys){if($key -ceq 'root'){continue};$path=[IO.Path]::GetFullPath($Fixture[$key]);$want=[IO.Path]::GetFullPath((Join-Path $root $expected[$key].Replace('/','\')));if($path -cne $want){return $result}}
+    $result.fixtureId=$id;$result.rootIdentity=$root;$result.parentIdentity=$parent;$existing=New-Object 'System.Collections.Generic.List[string]'
+    foreach($relative in @('.','protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin')) {
+      $path=if($relative -ceq '.'){$root}else{Join-Path $root $relative.Replace('/','\')};$item=$null
+      try {$item=Get-Item -LiteralPath $path -Force -ErrorAction Stop} catch [System.Management.Automation.ItemNotFoundException] {continue}
+      if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){$result.reason='REPARSE_REJECTED';return $result}
+      $existing.Add($relative)
+    }
+    $result.existing=$existing.ToArray();$result.rootExists=($result.existing -ccontains '.')
+    if($result.rootExists){foreach($relative in @('.','protected','control')){$dir=if($relative -ceq '.'){$root}else{Join-Path $root $relative};if([IO.Directory]::Exists($dir)){foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($dir)){$name=[IO.Path]::GetFileName($entry);$rel=if($relative -ceq '.') {$name}else{$relative+'/'+$name};if($rel -cnotin @('protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin')){$result.unexpected++};if($result.unexpected -gt 128){$result.reason='ENTRY_LIMIT';return $result}}}}}
+    $result.status='OBSERVED';$result.reason='NONE';return $result
+  }catch{return $result}
 }
 function Set-PhaseAFixtureAcl([string]$Path,[string[]]$FullSids,[string[]]$ReadSids,[hashtable]$Record=@{},[hashtable]$Io=@{}) {
   $acl=New-Object Security.AccessControl.DirectorySecurity
@@ -252,6 +292,7 @@ function New-PhaseAStage3Backend {
       return Invoke-PhaseAReadPipeProcess $token $sid $path $targetId $root $false $false $operation
     }
     CleanupVerified={ param($f) -not (Test-Path -LiteralPath $f.root -ErrorAction Stop) }
+    CleanupObservation={ param($f,$phase) Get-PhaseAFixtureCleanupObservation $f $phase 'LIVE' }
     Digest={ param($path) (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
     Inventory={ param($f) (Get-PhaseAInventory $f.protectedDir -Detailed).digest }
     InventoryDetailed={ param($f) Get-PhaseAInventory $f.protectedDir -Detailed }

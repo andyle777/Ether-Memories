@@ -74,7 +74,7 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
       if ([string]::IsNullOrEmpty($boundAudience) -or (Get-PhaseAEvidenceAudience $candidate $RunAttempt) -cne $boundAudience) { return $false }
       if ($kind -ceq 'authorization') { return ($ProvenanceVerified -and $LiveAuthorized) }
       if ($kind -ceq 'workflow_provenance') { return $ProvenanceVerified }
-      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclEstablishment','aclInspection','protectedInventory','unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) { return $false }
+      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclEstablishment','aclInspection','protectedInventory','fixtureCleanup','unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) { return $false }
       $fresh=New-PhaseAManagerVerdictInput $candidate.commit $candidate.runId
       Add-PhaseAActorEvidence $fresh $items $EvidenceClass
       Add-PhaseAPrimaryTokenEvidence $fresh $TokenJournal $items $EvidenceClass
@@ -263,9 +263,31 @@ function Add-PhaseAAclEstablishmentEvidence($VerdictInput,$Evidence,[string]$Evi
   $state=if($violated){'FAIL'}else{'PASS'};$reason=if($violated){'VIOLATION'}else{'NONE'};$canonical=[ordered]@{control='aclEstablishment';broker=$broker;legacy=$legacy;manager=$manager;records=$proofs.ToArray();cleanup=$Evidence.cleanupVerified;state=$state};$sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -InputObject $canonical -Compress -Depth 8;$proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()};if($VerdictInput.cases.aclEstablishment.state -ceq 'NOT_RUN'){$VerdictInput.cases.aclEstablishment=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$proof}}
  }catch{return}
 }
+function Add-PhaseAFixtureCleanupEvidence($VerdictInput,$Evidence,[string]$EvidenceClass,$ActorJournal) {
+ try {
+  if($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $Evidence -isnot [hashtable] -or $Evidence.cleanupVerified -isnot [bool] -or -not $Evidence.ContainsKey('fixtureCleanup') -or -not $Evidence.ContainsKey('aclFixtureBinding')){return}
+  $source=if($EvidenceClass -ceq 'LIVE_OBSERVED'){'LIVE'}else{'INJECTED'};$c=$Evidence.fixtureCleanup;$b=$Evidence.aclFixtureBinding;$actors=@($ActorJournal)
+  if($c -isnot [hashtable] -or $b -isnot [hashtable] -or $actors.Count -lt 2 -or $b.source -cne $source -or $b.fixtureId -cnotmatch '^ether-phase-a-store-[0-9a-f]{32}$'){return}
+  foreach($i in 0,1){$a=$actors[$i];$role=@('broker','legacy')[$i];if($a.role -cne $role -or $a.operation -cne 'probe' -or $a.accountSid -cne $a.tokenSid -or $a.accountSid -cne $(if($i -eq 0){$b.brokerSid}else{$b.legacySid}) -or $a.observation.expectedSid -cne $a.accountSid -or $a.observation.contained -isnot [bool] -or -not $a.observation.contained -or $a.observation.terminated -isnot [bool] -or -not $a.observation.terminated -or -not (Test-ActorObservation $a.observation $role 'allowed')){return}}
+  if($b.brokerSid -ceq $b.legacySid -or $b.rootIdentity -isnot [string] -or $b.rootIdentity -cne [IO.Path]::GetFullPath($b.rootIdentity).TrimEnd('\') -or [IO.Path]::GetFileName($b.rootIdentity) -cne $b.fixtureId){return}
+  $parent=[IO.Path]::GetDirectoryName($b.rootIdentity);if($source -ceq 'LIVE' -and $parent -cne [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)).TrimEnd('\')){return}
+  if($c.authorized -isnot [bool] -or -not $c.authorized -or $c.attempted -isnot [bool] -or -not $c.attempted -or $c.returned -isnot [bool] -or $c.reason -cnotin @('NONE','CLEANUP_FAILED')){return}
+  $allowed=@('.','protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin')
+  if($c.fixtureId -cne $b.fixtureId -or $c.rootIdentity -cne $b.rootIdentity -or $c.parentIdentity -cne $parent -or $c.identityAssurance -cne 'PATH_ONLY' -or $c.expected -isnot [array] -or $c.expected.Count -ne $allowed.Count){return};for($i=0;$i -lt $allowed.Count;$i++){if($c.expected[$i] -cne $allowed[$i]){return}}
+  foreach($phase in @('BEFORE','AFTER')){$o=if($phase -ceq 'BEFORE'){$c.before}else{$c.after};if($o -isnot [hashtable] -or $o.status -cne 'OBSERVED' -or $o.reason -cne 'NONE' -or $o.phase -cne $phase -or $o.source -cne $source -or $o.fixtureId -cne $b.fixtureId -or $o.rootIdentity -cne $b.rootIdentity -or $o.parentIdentity -cne $parent -or $o.identityAssurance -cne 'PATH_ONLY' -or $o.rootExists -isnot [bool] -or $o.existing -isnot [array] -or $o.unexpected -isnot [int] -or $o.unexpected -lt 0 -or $o.unexpected -gt 128){return};$seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase);foreach($x in $o.existing){if($x -isnot [string] -or $x -cnotin $allowed -or -not $seen.Add($x)){return}};if(($o.existing -ccontains '.') -cne $o.rootExists){return};if(-not $o.rootExists -and ($o.existing.Count -ne 0 -or $o.unexpected -ne 0)){return}}
+  if(-not $c.before.rootExists){return};$survived=$c.after.rootExists -or $c.after.existing.Count -gt 0 -or $c.after.unexpected -gt 0
+  # Path absence cannot prove that the original directory was not renamed or replaced.
+  # Until file identity and deletion continuity are observed, absence cannot produce PASS.
+  if(-not $survived){return}
+  if($survived -and $Evidence.cleanupVerified){return}
+  $state=if($survived){'FAIL'}else{'PASS'};$reason=if($survived){'CLEANUP_UNCONFIRMED'}else{'NONE'}
+  $canonical=[ordered]@{control='fixtureCleanup';fixture=$b.fixtureId;root=$b.rootIdentity;before=@($c.before.existing);attempted=$c.attempted;returned=$c.returned;operation=$c.reason;after=@($c.after.existing);unexpected=$c.after.unexpected;state=$state};$sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -InputObject $canonical -Compress -Depth 6;$proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()};if($VerdictInput.cases.fixtureCleanup.state -ceq 'NOT_RUN'){$VerdictInput.cases.fixtureCleanup=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$proof}}
+ }catch{return}
+}
 function Add-PhaseAStage3Evidence($VerdictInput,$Evidence,[string]$EvidenceClass,$ActorJournal=@()) {
   try {
     if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $Evidence -isnot [hashtable] -or $Evidence.cleanupVerified -isnot [bool]) { return }
+    Add-PhaseAFixtureCleanupEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
     Add-PhaseAAclEstablishmentEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
     Add-PhaseAProtectedInventoryEvidence $VerdictInput $Evidence $EvidenceClass $ActorJournal
     # Recompute establishment independently; a preexisting verdict entry is not proof.

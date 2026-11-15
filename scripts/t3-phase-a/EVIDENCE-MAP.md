@@ -37,7 +37,7 @@ on trusted run provenance and owner authorization for a final verdict.
 | protectedInventory | The manager captures bounded detailed baseline and before/after snapshots for each unauthorized operation; the verifier recomputes the legacy digest, checks fixture and actor-journal binding, and retains verified mutations. | Connected |
 | insecureAclControl | Stage 3 checks an intentionally permissive fixture; independent ACL and operation proofs are not retained. | Missing |
 | processCleanup | Launcher and supervisor close jobs and handles; complete independent cleanup proof is not retained. | Missing |
-| fixtureCleanup | Stage 3 removes fixture; independent absence proof is not retained. | Missing |
+| fixtureCleanup | Stage 3 records bounded cleanup and manager path observations; a surviving fixture path maps to cleanup unconfirmed. Absence remains NOT_RUN because original directory identity and rename/replacement continuity are not proven; cleanup inside failed setup is not connected. | Partial |
 | accountCleanup | Stage 1 closes tokens and removes accounts; independent per-account absence proof is not retained. | Missing |
 | experimentComplete | Stage manager aggregates outcomes; stage completion is not proof of individual observations. | Missing |
 
@@ -130,3 +130,5 @@ internal consistency checking, not a new Windows observation. Collection is
 not race-free: an entry can change between inspection and opening. Reparse
 points are rejected, but this does not eliminate time-of-check/time-of-use
 races. Hosted cross-identity enforcement remains unverified.
+
+Fixture cleanup observations are path-based and are subject to time-of-check/time-of-use races. A missing original path does not prove the original directory was not renamed or replaced; it cannot produce a fixtureCleanup PASS without independently verified identity and deletion continuity.
