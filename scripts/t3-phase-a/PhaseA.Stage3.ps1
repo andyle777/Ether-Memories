@@ -19,7 +19,7 @@ function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Tok
     if($EvidenceClass -ceq 'LIVE' -and -not $processEvidence){return $failure}
     $outcome=if ($raw.allowed -and $raw.error -eq 0) {'ALLOWED'} elseif (-not $raw.allowed -and $raw.error -eq 5) {'ACCESS_DENIED'} elseif (-not $raw.allowed -and $raw.error -in @(2,3,6,32,80,87,123,183)) { return @{status='UNVERIFIED';reason='NATIVE_ERROR';evidence=$EvidenceClass;operation=$Operation;target=$TargetId;nativeError=$raw.error} } else { return $failure }
     $result=@{status='OBSERVED';reason='NONE';evidence=$EvidenceClass;sid=$raw.sid;operation=$Operation;target=$TargetId;outcome=$outcome;nativeError=$raw.error;handlesClosed=$raw.handlesClosed}; if($processEvidence){$result.execution='PROCESS';$result.processVerified=$raw.processVerified;$result.terminated=$raw.terminated;$result.pid=$raw.pid;$result.createdAt=$raw.createdAt;$result.pipeClientPid=$raw.pipeClientPid;$result.nonce=$raw.nonce}else{$result.reverted=$raw.reverted};return $result
-  } catch { $code=$_.Exception.GetBaseException().Message; if ($code -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; if($code -cin @('WITNESS_TIMEOUT','WITNESS_CLEANUP_FAILED')) {return @{status='UNVERIFIED';reason=$code;evidence=$EvidenceClass}}; return $failure }
+  } catch { $code=$_.Exception.GetBaseException().Message; if ($code -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; if($code -ceq 'WITNESS_CLEANUP_FAILED'){throw 'WITNESS_CLEANUP_FAILED'}; if($code -ceq 'WITNESS_TIMEOUT') {return @{status='UNVERIFIED';reason=$code;evidence=$EvidenceClass}}; return $failure }
 }
 function Get-PhaseAInventorySnapshot($Backend,$Fixture,$Account,[string]$Control,[string]$Phase) {
   $positions=@{unauthorizedRead=0;unauthorizedWrite=1;unauthorizedCreate=2;unauthorizedRename=3;unauthorizedDelete=4}
@@ -76,7 +76,7 @@ function Get-PhaseAManagerAclObservation($Fixture,[string]$Role,$Record,[string]
 function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hashtable]$ActorBackend,[hashtable]$EvidenceSink=@{}) {
   $cases=@{acl=$false;authorizedRead=$false;authorizedCreate=$false;authorizedReadback=$false;
     unauthorizedRead=$false;unauthorizedWrite=$false;unauthorizedCreate=$false;proposedDelete=$false;proposedRename=$false;inventory=$false;insecureRejected=$false;fixtureCleanup=$false}
-  $evidence=@{cleanupVerified=$false}; $EvidenceSink['evidence']=$evidence; $EvidenceSink['cases']=$cases; $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false
+  $evidence=@{cleanupVerified=$false}; $EvidenceSink['evidence']=$evidence; $EvidenceSink['cases']=$cases; $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false; $cleanupBlocked=$false
   try {
     $observer={param($f,$record) if($FixtureBackend.ContainsKey('ObserveAcl')) { try {$o=& $FixtureBackend.ObserveAcl $f $record.role $record; if(-not $evidence.ContainsKey('aclCorroboration')){$evidence['aclCorroboration']=New-Object 'System.Collections.Generic.List[object]'};$evidence.aclCorroboration.Add($o);if($o.status -ceq 'OBSERVED' -and -not $evidence.ContainsKey('aclFixtureBinding')){$evidence['aclFixtureBinding']=@{fixtureId=$o.fixtureId;rootIdentity=[IO.Path]::GetFullPath($f.root).TrimEnd('\');brokerSid=$Accounts[0].sid;legacySid=$Accounts[1].sid;source=$o.source}}}catch{} }}.GetNewClosure()
     $cleanupObserver={param($f,$phase) if(-not $FixtureBackend.ContainsKey('CleanupObservation')){return $null};$o=& $FixtureBackend.CleanupObservation $f $phase;if($o -is [hashtable] -and $o.status -ceq 'OBSERVED' -and -not $evidence.ContainsKey('setupFixtureBinding')){$evidence['setupFixtureBinding']=@{fixtureId=$o.fixtureId;rootIdentity=$o.rootIdentity;brokerSid=$Accounts[0].sid;legacySid=$Accounts[1].sid;source=$o.source}};return $o}.GetNewClosure()
@@ -134,14 +134,15 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
   } catch {
     $base=$_.Exception.GetBaseException().Message
     if ($base -ceq 'STAGE2_CHILD_UNCONFIRMED') { $unconfirmed=$true }
+    elseif ($base -cin @('STAGE2_CLEANUP_FAILED','WITNESS_CLEANUP_FAILED')) { $cleanupBlocked=$true; $status='STAGE3_CLEANUP_FAILED' }
     elseif ($base -ceq 'STAGE3_ACL_REJECTED') { $status='STAGE3_ACL_REJECTED' }
     elseif ($base -ceq 'STAGE3_CLEANUP_FAILED') { $status='STAGE3_CLEANUP_FAILED' }
   } finally {
     if ($null -ne $fixture -and $FixtureBackend.ContainsKey('CleanupObservation')) {
-      $evidence['fixtureCleanup']=@{fixtureId='';rootIdentity='';parentIdentity='';identityAssurance='PATH_ONLY';expected=@('.','protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin');authorized=(-not $unconfirmed);attempted=$false;returned=$false;reason=$(if($unconfirmed){'CHILD_UNCONFIRMED'}else{'NOT_ATTEMPTED'});before=$null;after=$null}
+      $evidence['fixtureCleanup']=@{fixtureId='';rootIdentity='';parentIdentity='';identityAssurance='PATH_ONLY';expected=@('.','protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin');authorized=(-not ($unconfirmed -or $cleanupBlocked));attempted=$false;returned=$false;reason=$(if($unconfirmed){'CHILD_UNCONFIRMED'}elseif($cleanupBlocked){'PROCESS_CLEANUP_FAILED'}else{'NOT_ATTEMPTED'});before=$null;after=$null}
       try {$evidence.fixtureCleanup.rootIdentity=[IO.Path]::GetFullPath($fixture.root).TrimEnd('\');$evidence.fixtureCleanup.parentIdentity=[IO.Path]::GetFullPath($fixture.parent).TrimEnd('\');$evidence.fixtureCleanup.fixtureId=[IO.Path]::GetFileName($evidence.fixtureCleanup.rootIdentity)} catch {}
     }
-    if ($null -ne $fixture -and -not $unconfirmed) {
+    if ($null -ne $fixture -and -not $unconfirmed -and -not $cleanupBlocked) {
       try {
         if ($evidence.ContainsKey('fixtureCleanup')) {
           $cleanup=$evidence.fixtureCleanup;$cleanup.before=& $FixtureBackend.CleanupObservation $fixture 'BEFORE'
@@ -161,6 +162,7 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
     }
   }
   if ($unconfirmed) { throw 'STAGE2_CHILD_UNCONFIRMED' }
+  if ($cleanupBlocked) { throw 'STAGE2_RESOURCE_UNCONFIRMED' }
   if ($status -ceq 'STAGE3_COMPLETE' -and @($cases.Values | Where-Object { $_ -isnot [bool] -or -not $_ }).Count -ne 0) { $status='STAGE3_CASE_FAILED' }
   return @{status=$status;cases=$cases;evidence=$evidence}
 }

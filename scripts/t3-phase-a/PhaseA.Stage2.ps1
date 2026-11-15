@@ -28,6 +28,7 @@ function Invoke-PhaseAStage2($Accounts, $Tokens, [hashtable]$Backend) {
     } catch {
       $reason=$_.Exception.GetBaseException().Message
       if ($reason -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }
+      if ($reason -ceq 'STAGE2_CLEANUP_FAILED') { throw 'STAGE2_RESOURCE_UNCONFIRMED' }
       if ($reason -in @('STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED','STAGE2_OBSERVATION_REJECTED')) { return $reason }
       return 'STAGE2_LAUNCH_FAILED'
     }
@@ -203,7 +204,8 @@ function Invoke-PhaseASupervisorEvidence([scriptblock]$SameIdentityProbe) {
       $backend=@{Run={param($a,$t) throw $reason}.GetNewClosure()}
       $observed=''
       try { $observed=Invoke-PhaseAStage2 $accounts $tokens $backend } catch { $observed=$_.Exception.GetBaseException().Message }
-      if ($observed -cne $reason) { return $result }
+      $expected=if($reason -ceq 'STAGE2_CLEANUP_FAILED'){'STAGE2_RESOURCE_UNCONFIRMED'}else{$reason}
+      if ($observed -cne $expected) { return $result }
     }
     $result.injected='SIMULATED_PASS'; $result.sameIdentity='FAIL'; $result.reason='SUPERVISOR_PROBE_FAILED'
     $probeResult=& $SameIdentityProbe

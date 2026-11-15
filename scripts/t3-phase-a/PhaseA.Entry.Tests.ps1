@@ -103,7 +103,7 @@ if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('remove:broker'
 $script:events.Clear(); $script:seq=0
 $badLaunch=@{Run={ param($a,$t) throw 'STAGE2_CLEANUP_FAILED' }}
 $r=Invoke-PhaseAStages $true $true $fake $badLaunch
-if ($r -cne 'STAGE2_CLEANUP_FAILED' -or -not $script:events.Contains('remove:broker')) { throw 'Stage 2 cleanup failure was not reported' }
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('close:broker') -or $script:events.Contains('remove:broker')) { throw 'Stage 2 resource cleanup failure did not preserve dependent resources' }
 $script:events.Clear(); $script:seq=0
 $badLaunch=@{Run={ param($a,$t) throw 'STAGE2_CHILD_UNCONFIRMED' }}
 $r=Invoke-PhaseAStages $true $true $fake $badLaunch

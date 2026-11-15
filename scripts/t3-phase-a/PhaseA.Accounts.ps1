@@ -35,7 +35,7 @@ function Invoke-PhaseAAccountGate([bool]$Enabled, [hashtable]$Backend, [scriptbl
         $base -is [UnauthorizedAccessException] -or $_.CategoryInfo.Category -eq 'PermissionDenied') { $reason='ACCOUNT_PRIVILEGE_UNAVAILABLE' }
     if ($base -is [ComponentModel.Win32Exception] -and $base.NativeErrorCode -eq 1385) { $reason='ACCOUNT_LOGON_RIGHT_UNAVAILABLE' }
     if ($base.Message -ceq 'ACCOUNT_CLEANUP_FAILED') { $reason='ACCOUNT_CLEANUP_FAILED' }
-    if ($base.Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { $childUnconfirmed=$true; $cleanupFailed=$true }
+    if ($base.Message -cin @('STAGE2_CHILD_UNCONFIRMED','STAGE2_RESOURCE_UNCONFIRMED')) { $childUnconfirmed=$true; $cleanupFailed=$true }
   } finally {
     if ($childUnconfirmed) { $script:PhaseAUnconfirmedResources=@{ tokens=$tokens; accounts=$accounts } }
     if (-not $childUnconfirmed) {
