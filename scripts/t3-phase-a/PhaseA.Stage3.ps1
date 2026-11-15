@@ -79,7 +79,8 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
   $evidence=@{cleanupVerified=$false}; $EvidenceSink['evidence']=$evidence; $EvidenceSink['cases']=$cases; $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false
   try {
     $observer={param($f,$record) if($FixtureBackend.ContainsKey('ObserveAcl')) { try {$o=& $FixtureBackend.ObserveAcl $f $record.role $record; if(-not $evidence.ContainsKey('aclCorroboration')){$evidence['aclCorroboration']=New-Object 'System.Collections.Generic.List[object]'};$evidence.aclCorroboration.Add($o);if($o.status -ceq 'OBSERVED' -and -not $evidence.ContainsKey('aclFixtureBinding')){$evidence['aclFixtureBinding']=@{fixtureId=$o.fixtureId;rootIdentity=[IO.Path]::GetFullPath($f.root).TrimEnd('\');brokerSid=$Accounts[0].sid;legacySid=$Accounts[1].sid;source=$o.source}}}catch{} }}.GetNewClosure()
-    $fixture=& $FixtureBackend.Setup $Accounts $evidence $observer
+    $cleanupObserver={param($f,$phase) if(-not $FixtureBackend.ContainsKey('CleanupObservation')){return $null};$o=& $FixtureBackend.CleanupObservation $f $phase;if($o -is [hashtable] -and $o.status -ceq 'OBSERVED' -and -not $evidence.ContainsKey('setupFixtureBinding')){$evidence['setupFixtureBinding']=@{fixtureId=$o.fixtureId;rootIdentity=$o.rootIdentity;brokerSid=$Accounts[0].sid;legacySid=$Accounts[1].sid;source=$o.source}};return $o}.GetNewClosure()
+    $fixture=& $FixtureBackend.Setup $Accounts $evidence $observer $cleanupObserver
     if ($null -eq $fixture -or ($fixture.aclInspected -isnot [bool] -or -not $fixture.aclInspected)) { throw 'STAGE3_ACL_REJECTED' }
     if ($fixture -is [hashtable] -and $fixture.ContainsKey('aclEvidence')) { $evidence['aclInspection']=$fixture.aclEvidence }
     $cases.acl=$true; $status='STAGE3_CASE_FAILED'
@@ -234,10 +235,28 @@ function Remove-PhaseAFixture($Fixture) {
   }
   foreach ($dir in @($Fixture.protectedDir,$Fixture.controlDir,$root)) { if ([IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir,$false) } }
 }
+function Invoke-PhaseASetupCreation($Records,[string]$Role,[scriptblock]$Operation) {
+  if($Role -cnotin @('root','protected','control','protectedFile','controlFile')){throw 'STAGE3_SETUP_FAILED'}
+  $record=@{role=$Role;sequence=$Records.Count;attempted=$true;result='UNCONFIRMED'};$Records.Add($record)
+  try {$null=& $Operation;$record.result='CREATED'} catch {throw}
+}
+function Invoke-PhaseAEarlyFixtureCleanup($Fixture,[hashtable]$Evidence,$Creation,[bool]$RootCreated,[bool]$ChildUnconfirmed,[string]$SetupReason,[scriptblock]$Observe,[scriptblock]$Cleanup) {
+  $root=[IO.Path]::GetFullPath($Fixture.root).TrimEnd('\');$parent=[IO.Path]::GetFullPath($Fixture.parent).TrimEnd('\')
+  $c=@{route='SETUP_FAILURE';fixtureId=[IO.Path]::GetFileName($root);rootIdentity=$root;parentIdentity=$parent;identityAssurance='PATH_ONLY';expected=@('.','protected','control','protected/original.bin','protected/committed.bin','protected/rejected.bin','protected/original.bin.renamed','control/original.bin','protected/witness-authorized.bin','control/witness-permissive.bin');authorized=($RootCreated -and -not $ChildUnconfirmed);attempted=$false;returned=$false;reason=$(if($ChildUnconfirmed){'CHILD_UNCONFIRMED'}elseif(-not $RootCreated){'ROOT_UNCONFIRMED'}else{'NOT_ATTEMPTED'});setupReason=$SetupReason;creation=$Creation;before=$null;after=$null}
+  $Evidence['fixtureCleanup']=$c;$Evidence.cleanupVerified=$false
+  if($ChildUnconfirmed){return}
+  if(-not $RootCreated){if($Creation.Count -gt 0 -and $null -ne $Observe){try{$c.after=& $Observe $Fixture 'AFTER'}catch{$c.after=$null}};return}
+  try {
+    if($null -eq $Observe){$c.reason='PRECHECK_FAILED';return};$c.before=& $Observe $Fixture 'BEFORE'
+    if($c.before -isnot [hashtable] -or $c.before.status -cne 'OBSERVED' -or -not $c.before.rootExists){$c.reason='PRECHECK_FAILED';return}
+    $c.attempted=$true;$null=& $Cleanup $Fixture;$c.returned=$true;$c.reason='NONE'
+  } catch {$c.reason=if($c.attempted){'CLEANUP_FAILED'}else{'PRECHECK_FAILED'}}
+  finally {if($c.attempted){try{$c.after=& $Observe $Fixture 'AFTER'}catch{$c.after=$null}}}
+}
 function New-PhaseAStage3Backend {
   return @{
     ObserveAcl={param($fixture,$role,$record) Get-PhaseAManagerAclObservation $fixture $role $record 'LIVE'}
-    Setup={ param($accounts,$evidence,$observe)
+    Setup={ param($accounts,$evidence,$observe,$cleanupObserve)
       $common=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
       if ([string]::IsNullOrWhiteSpace($common)) { throw 'STAGE3_SETUP_FAILED' }
       $parent=[IO.Path]::GetFullPath($common).TrimEnd('\')
@@ -247,6 +266,7 @@ function New-PhaseAStage3Backend {
         protectedFile=(Join-Path $protectedDir 'original.bin');newFile=(Join-Path $protectedDir 'committed.bin');
         deniedFile=(Join-Path $protectedDir 'rejected.bin');controlFile=(Join-Path $controlDir 'original.bin');authorizedProbeFile=(Join-Path $protectedDir 'witness-authorized.bin');controlProbeFile=(Join-Path $controlDir 'witness-permissive.bin');aclInspected=$false}
       $aclRecords=New-Object 'System.Collections.Generic.List[object]'; $evidence['aclEstablishment']=$aclRecords
+      $creation=New-Object 'System.Collections.Generic.List[object]';$evidence['fixtureSetupCreation']=$creation
       $created=$false
       try {
         $manager=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -254,17 +274,17 @@ function New-PhaseAStage3Backend {
             $accounts[0].sid -ceq 'S-1-5-18' -or $accounts[1].sid -ceq 'S-1-5-18') { throw 'identity overlap' }
         $drive=New-Object IO.DriveInfo([IO.Path]::GetPathRoot($root))
         if ($drive.DriveFormat -cne 'NTFS') { throw 'NTFS required' }
-        $null=New-Item -ItemType Directory -Path $root -ErrorAction Stop; $created=$true
+        Invoke-PhaseASetupCreation $creation 'root' {New-Item -ItemType Directory -Path $root -ErrorAction Stop}; $created=$true
         if (((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'fixture reparse point rejected' }
         try { $null=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'root' $root 0 @($manager,'S-1-5-18') @($accounts[0].sid,$accounts[1].sid) 'LIVE' @{} $observe } catch { throw 'STAGE3_ACL_REJECTED' }
-        $null=New-Item -ItemType Directory -Path $protectedDir -ErrorAction Stop
-        $null=New-Item -ItemType Directory -Path $controlDir -ErrorAction Stop
+        Invoke-PhaseASetupCreation $creation 'protected' {New-Item -ItemType Directory -Path $protectedDir -ErrorAction Stop}
+        Invoke-PhaseASetupCreation $creation 'control' {New-Item -ItemType Directory -Path $controlDir -ErrorAction Stop}
         try {
           $protectedAcl=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'protected' $protectedDir 1 @($manager,'S-1-5-18',$accounts[0].sid) @() 'LIVE' @{} $observe
           $null=Invoke-PhaseARecordedFixtureAcl $aclRecords $f 'control' $controlDir 2 @($manager,'S-1-5-18',$accounts[0].sid,$accounts[1].sid) @() 'LIVE' @{} $observe
         } catch { throw 'STAGE3_ACL_REJECTED' }
-        [IO.File]::WriteAllText($f.protectedFile,'ether-phase-a-synthetic',[Text.Encoding]::ASCII)
-        [IO.File]::WriteAllText($f.controlFile,'ether-phase-a-control',[Text.Encoding]::ASCII)
+        Invoke-PhaseASetupCreation $creation 'protectedFile' {[IO.File]::WriteAllText($f.protectedFile,'ether-phase-a-synthetic',[Text.Encoding]::ASCII)}
+        Invoke-PhaseASetupCreation $creation 'controlFile' {[IO.File]::WriteAllText($f.controlFile,'ether-phase-a-control',[Text.Encoding]::ASCII)}
         $sha=[Security.Cryptography.SHA256]::Create()
         try {
           $f.initialDigest=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes('ether-phase-a-synthetic'))).Replace('-','').ToLowerInvariant()
@@ -272,8 +292,9 @@ function New-PhaseAStage3Backend {
         } finally { $sha.Dispose() }
         $f.aclEvidence=$protectedAcl; $f.aclInspected=$true; return $f
       } catch {
-        if ($created) { try { Remove-PhaseAFixture $f } catch { throw 'STAGE3_CLEANUP_FAILED' } }
-        throw
+        $original=$_;$base=$original.Exception.GetBaseException().Message;$reason=if($base -ceq 'STAGE3_ACL_REJECTED'){'ACL_REJECTED'}elseif($base -ceq 'STAGE2_CHILD_UNCONFIRMED'){'CHILD_UNCONFIRMED'}else{'SETUP_FAILED'}
+        try {Invoke-PhaseAEarlyFixtureCleanup $f $evidence $creation $created ($base -ceq 'STAGE2_CHILD_UNCONFIRMED') $reason $cleanupObserve {param($fixture) Remove-PhaseAFixture $fixture}}catch{}
+        throw $original
       }
     }
     Exists={ param($path) [IO.File]::Exists($path) }
