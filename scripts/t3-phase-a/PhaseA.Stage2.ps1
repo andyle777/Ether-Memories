@@ -42,20 +42,51 @@ function Invoke-PhaseAStage2($Accounts, $Tokens, [hashtable]$Backend) {
   }
   return 'STAGE2_COMPLETE'
 }
-function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashtable]$AccountBackend, [hashtable]$ActorBackend, [bool]$FilesystemEnabled=$false, [hashtable]$FixtureBackend=@{}, [hashtable]$Stage3Result=@{}, [bool]$HostedEnabled=$false, [hashtable]$SupervisorBackend=@{}, [hashtable]$HostedResult=@{}) {
+function Test-PhaseASupervisorCleanup($Lifetime) {
+  try {
+    if($Lifetime -isnot [hashtable] -or $Lifetime.cleanupSucceeded -isnot [bool] -or -not $Lifetime.cleanupSucceeded -or $Lifetime.cleanupObservation -isnot [hashtable]){return $false}
+    $c=$Lifetime.cleanupObservation
+    if($c.supervisorCreated -isnot [bool] -or $c.childRequired -isnot [bool] -or $c.jobClose -cnotin @('CLOSED','NOT_CREATED') -or $c.inspectionHandle -cnotin @('NOT_OPENED','DISPOSE_RETURNED')){return $false}
+    if($c.supervisorCreated){if($c.jobClose -cne 'CLOSED' -or $c.supervisorWait -cne 'SIGNALED' -or $c.supervisorHandle -cne 'CLOSED'){return $false}}
+    elseif($c.supervisorWait -cne 'NOT_RUN' -or $c.supervisorHandle -cne 'NOT_CREATED' -or $c.childRequired){return $false}
+    if($c.childRequired){if(-not $c.supervisorCreated -or $c.childIdentity -cne 'MATCHED' -or $c.childWait -cne 'SIGNALED' -or $c.childHandle -cne 'DISPOSE_RETURNED'){return $false}}
+    elseif($c.childIdentity -cne 'NOT_OBSERVED' -or $c.childWait -cne 'NOT_RUN' -or $c.childHandle -cne 'NOT_OPENED'){return $false}
+    return $true
+  }catch{return $false}
+}
+function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashtable]$AccountBackend, [hashtable]$ActorBackend, [bool]$FilesystemEnabled=$false, [hashtable]$FixtureBackend=@{}, [hashtable]$Stage3Result=@{}, [bool]$HostedEnabled=$false, [hashtable]$SupervisorBackend=@{}, [hashtable]$HostedResult=@{}, [bool]$RequireTrustedHosted=$true) {
   if ($FilesystemEnabled -and (-not $AccountEnabled -or -not $ActorEnabled)) { return 'STAGE3_GUARD_REJECTED' }
   if ($ActorEnabled -and -not $AccountEnabled) { return 'STAGE2_GUARD_REJECTED' }
   if (-not $AccountEnabled) { return 'LIVE_DISABLED' }
-  $state=@{reason='IMPLEMENTATION_INCOMPLETE';enabled=$ActorEnabled;backend=$ActorBackend;filesystem=$FilesystemEnabled;fixture=$FixtureBackend;result=$Stage3Result;hosted=$HostedEnabled;supervisor=$SupervisorBackend;hostedResult=$HostedResult}
+  $trustedHostedRun=$null
+  if($RequireTrustedHosted -and (Get-Variable -Name PhaseATrustedHostedBackends -Scope Script -ErrorAction SilentlyContinue) -and $script:PhaseATrustedHostedBackends.ContainsKey($SupervisorBackend)){$trustedHostedRun=$script:PhaseATrustedHostedBackends[$SupervisorBackend]}
+  $state=@{reason='IMPLEMENTATION_INCOMPLETE';enabled=$ActorEnabled;backend=$ActorBackend;filesystem=$FilesystemEnabled;fixture=$FixtureBackend;result=$Stage3Result;hosted=$HostedEnabled;supervisor=$SupervisorBackend;hostedResult=$HostedResult;requireTrustedHosted=$RequireTrustedHosted;trustedHostedRun=$trustedHostedRun}
   $callback={
     param($accounts,$tokens)
     if ($state.enabled) {
       $state.reason=Invoke-PhaseAStage2 $accounts $tokens $state.backend
       if ($state.reason -cne 'STAGE2_COMPLETE') { throw 'stage 2 failed' }
       if ($state.hosted) {
+        if($state.requireTrustedHosted -and ($null -eq $state.trustedHostedRun -or -not [object]::ReferenceEquals($state.trustedHostedRun,$state.supervisor.Run))){throw 'STAGE2_RESOURCE_UNCONFIRMED'}
         try { $control=Invoke-PhaseAHostedSupervision $accounts[0] $tokens[0] $state.supervisor 'LIVE' $state.hostedResult }
-        catch { if ($_.Exception.GetBaseException().Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; throw }
+        catch { if ($_.Exception.GetBaseException().Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; throw 'STAGE2_RESOURCE_UNCONFIRMED' }
+        if($control -isnot [hashtable] -or $control.cases -isnot [hashtable] -or $control.status -isnot [string]){throw 'STAGE2_RESOURCE_UNCONFIRMED'}
         $state.hostedResult['cases']=$control.cases
+        # A failed or malformed supervision result must not release accounts
+        # while its backend-owned process resources remain unconfirmed.
+        $attempted=0;$cleanupConfirmed=$true
+        foreach($mode in @('supervisorDeath','jobClosure','timeout')) {
+          if(-not $control.cases.ContainsKey($mode)){$cleanupConfirmed=$false;continue}
+          $case=$control.cases[$mode]
+          if($case -isnot [hashtable] -or -not $case.ContainsKey('status')){$cleanupConfirmed=$false;continue}
+          if($case.status -ceq 'NOT_RUN'){continue}
+          $attempted++
+          if(-not $state.hostedResult.ContainsKey('processLifetime') -or $state.hostedResult.processLifetime -isnot [hashtable] -or -not $state.hostedResult.processLifetime.ContainsKey($mode)){$cleanupConfirmed=$false;continue}
+          $life=$state.hostedResult.processLifetime[$mode]
+          if($life -isnot [hashtable] -or -not $life.ContainsKey('mode') -or $life.mode -cne $mode -or -not $life.ContainsKey('source') -or $life.source -cne 'LIVE' -or -not (Test-PhaseASupervisorCleanup $life)){$cleanupConfirmed=$false}
+          if($case.ContainsKey('reason') -and $case.reason -ceq 'CLEANUP_FAILED'){$cleanupConfirmed=$false}
+        }
+        if($attempted -eq 0 -or -not $cleanupConfirmed){throw 'STAGE2_RESOURCE_UNCONFIRMED'}
         if ($control.status -cne 'LIVE_OBSERVED') { $state.reason='SUPERVISOR_LIVE_FAILED'; throw 'hosted supervisor controls failed' }
       }
       if ($state.filesystem) {

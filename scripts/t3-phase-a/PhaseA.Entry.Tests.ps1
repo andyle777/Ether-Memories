@@ -234,9 +234,9 @@ $fakeHosted.Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$tru
 $sv=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1';role='broker'} @{sid='S-1-5-21-1'} $fakeHosted 'INJECTED'
 if ($sv.status -cne 'FAIL' -or $sv.cases.supervisorDeath.reason -cne 'CHILD_SURVIVED') { throw 'Surviving supervisor child accepted' }
 Write-Output 'PASS hosted supervisor injected orchestration (2)'
-$hostedGood=@{Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$true;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true} }}
+$hostedGood=@{Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$true;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true;processLifetime=@{mode=$mode;cleanupSucceeded=$true;cleanupObservation=@{jobClose='CLOSED';supervisorCreated=$true;supervisorWait='SIGNALED';supervisorHandle='CLOSED';inspectionHandle='DISPOSE_RETURNED';childRequired=$true;childIdentity='MATCHED';childWait='SIGNALED';childHandle='DISPOSE_RETURNED'}}} }}
 $script:events.Clear(); $script:seq=0; $liveResult=@{}
-$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $hostedGood $liveResult
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $hostedGood $liveResult $false
 if ($r -cne 'STAGE2_COMPLETE' -or $liveResult.cases.timeout.status -cne 'LIVE_OBSERVED' -or -not $script:events.Contains('remove:broker')) { throw 'Manager supervisor dispatch failed' }
 foreach ($pair in @(@('identity','IDENTITY_MISMATCH'),@('pid','PID_MISMATCH'),@('creationTime','TIME_MISMATCH'),@('membership','JOB_MISMATCH'),@('supervisorTerminated','SUPERVISOR_SURVIVED'),@('cleanup','CLEANUP_FAILED'),@('timeoutObserved','TIMEOUT_NOT_OBSERVED'))) {
   $script:badSupervisorField=$pair[0]
@@ -247,11 +247,11 @@ foreach ($pair in @(@('identity','IDENTITY_MISMATCH'),@('pid','PID_MISMATCH'),@(
 }
 $bad=@{Run={param($a,$t,$mode) throw 'STAGE2_CHILD_UNCONFIRMED'}}
 $script:events.Clear(); $script:seq=0
-$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $bad @{}
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $bad @{} $false
 if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('remove:broker')) { throw 'Unconfirmed supervisor child was not fail-closed' }
 Write-Output 'PASS manager-connected supervisor controls and failure categories (9)'
 $script:events.Clear(); $script:seq=0; $uncertain=@{}
-$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $bad $uncertain
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $bad $uncertain $false
 if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $uncertain.cases.supervisorDeath.reason -cne 'CHILD_UNCONFIRMED') { throw 'Unconfirmed child reason lost' }
 $malformed=$reportTest.Clone(); $malformed.supervisorCases=@{}
 if (Test-PhaseAObservationReport $malformed) { throw 'Missing supervisor observations accepted' }
