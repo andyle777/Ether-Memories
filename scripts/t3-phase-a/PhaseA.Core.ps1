@@ -139,7 +139,27 @@ function Test-PhaseAPins([hashtable]$Pins) {
   }
   return $true
 }
-function Invoke-PhaseAGit([string]$Repository, [string]$Arguments, $Journal=$null, [scriptblock]$ProcessFactory={New-Object Diagnostics.Process}, [string]$Experiment='', [string]$Operation='OTHER', [int]$Sequence=0, [scriptblock]$Observer={param($id) $other=Get-Process -Id $id -ErrorAction Stop;try{return @{pid=$other.Id;createdAt=$other.StartTime.ToUniversalTime().ToString('o')}}finally{$other.Dispose()}}) {
+function Get-PhaseARetainedProcessIdentity($Handle) {
+  if(-not ('PhaseAPreflightIdentity' -as [type])){
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class PhaseAPreflightIdentity {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint GetProcessId(SafeProcessHandle process);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit, out long kernel, out long user);
+  public static object[] Observe(SafeProcessHandle process) {
+    uint pid=GetProcessId(process); if(pid==0) throw new Win32Exception(Marshal.GetLastWin32Error());
+    long creation,exit,kernel,user; if(!GetProcessTimes(process,out creation,out exit,out kernel,out user)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    return new object[] { checked((int)pid), DateTime.FromFileTimeUtc(creation).ToString("o") };
+  }
+}
+'@ -ErrorAction Stop
+  }
+  $v=[PhaseAPreflightIdentity]::Observe($Handle);return @{pid=$v[0];createdAt=$v[1]}
+}
+function Invoke-PhaseAGit([string]$Repository, [string]$Arguments, $Journal=$null, [scriptblock]$ProcessFactory={New-Object Diagnostics.Process}, [string]$Experiment='', [string]$Operation='OTHER', [int]$Sequence=0, [scriptblock]$Observer=$null) {
   if($Experiment -ceq ''){$Experiment=[Guid]::NewGuid().ToString('N')}
   $record=@{role='CHECKOUT_PREFLIGHT';experiment=$Experiment;operation=$Operation;sequence=$Sequence;attempt=[Guid]::NewGuid().ToString('N');launch='ATTEMPTED';pid=$null;createdAt=$null;observedPid=$null;observedCreatedAt=$null;identity='NOT_OBSERVED';waitAttempted=$false;firstWait='NOT_RUN';wait='NOT_RUN';termination='NOT_REQUESTED';exitObserved=$false;exitCode=$null;managedDispose='NOT_ATTEMPTED';nativeClose='NOT_OBSERVED';error='NONE'}
   if($null -ne $Journal){$Journal.Add($record)}
@@ -152,9 +172,11 @@ function Invoke-PhaseAGit([string]$Repository, [string]$Arguments, $Journal=$nul
   try {
     $p = & $ProcessFactory; $p.StartInfo = $start
     if (-not $p.Start()) { $record.launch='FAILED';$record.error='START_FAILED';throw 'start failed' }
-    $record.launch='CREATED';$record.pid=$p.Id
+    $record.launch='CREATED';$nativeHandle=$null
+    if($null -eq $Observer){try{$nativeHandle=$p.SafeHandle}catch{$record.error='HANDLE_UNAVAILABLE'}}
+    $record.pid=$p.Id
     try{$record.createdAt=$p.StartTime.ToUniversalTime().ToString('o')}catch{$record.error='CREATION_TIME_UNAVAILABLE'}
-    try{$independent=& $Observer $record.pid;if($independent -is [hashtable]){$record.observedPid=$independent.pid;$record.observedCreatedAt=$independent.createdAt;if($record.pid -eq $independent.pid -and $record.createdAt -and $record.createdAt -ceq $independent.createdAt){$record.identity='MATCHED'}else{$record.identity='MISMATCH';$record.error='IDENTITY_MISMATCH'}}else{$record.identity='UNAVAILABLE';$record.error='IDENTITY_UNAVAILABLE'}}catch{$record.identity='UNAVAILABLE';$record.error='IDENTITY_UNAVAILABLE'}
+    try{if($null -eq $Observer){if($null -eq $nativeHandle){throw 'handle unavailable'};$independent=Get-PhaseARetainedProcessIdentity $nativeHandle}else{$independent=& $Observer $record.pid};if($independent -is [hashtable]){$record.observedPid=$independent.pid;$record.observedCreatedAt=$independent.createdAt;if($record.pid -eq $independent.pid -and $record.createdAt -and $record.createdAt -ceq $independent.createdAt){$record.identity='MATCHED'}else{$record.identity='MISMATCH';$record.error='IDENTITY_MISMATCH'}}else{$record.identity='UNAVAILABLE';$record.error='IDENTITY_UNAVAILABLE'}}catch{$record.identity='UNAVAILABLE';if($record.error -ceq 'NONE'){$record.error='IDENTITY_UNAVAILABLE'}}
     $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
     $record.waitAttempted=$true
     if (-not $p.WaitForExit(10000)) { $record.firstWait='TIMEOUT';$record.wait='TIMEOUT';$record.termination='REQUESTED';$p.Kill();if($p.WaitForExit(5000)){$record.wait='SIGNALED';$record.exitObserved=$true;try{$record.exitCode=$p.ExitCode}catch{$record.error='EXIT_CODE_UNAVAILABLE'}}else{$record.wait='UNCONFIRMED';$record.error='TERMINATION_UNCONFIRMED';$keep=$true} }
@@ -179,7 +201,7 @@ function Test-PhaseAPreflightJournal($Journal,[string]$Experiment,[string[]]$Ope
     return $true
   } catch { return $false }
 }
-function Test-PhaseACheckout([string]$Repository, [string]$ExpectedHead, [string]$Base, $Journal=$null, [scriptblock]$ProcessFactory={New-Object Diagnostics.Process}, [scriptblock]$Observer={param($id) $other=Get-Process -Id $id -ErrorAction Stop;try{return @{pid=$other.Id;createdAt=$other.StartTime.ToUniversalTime().ToString('o')}}finally{$other.Dispose()}}) {
+function Test-PhaseACheckout([string]$Repository, [string]$ExpectedHead, [string]$Base, $Journal=$null, [scriptblock]$ProcessFactory={New-Object Diagnostics.Process}, [scriptblock]$Observer=$null) {
   if ($ExpectedHead -cnotmatch '^[0-9a-f]{40}$' -or $Base -cnotmatch '^[0-9a-f]{40}$') { return $false }
   if($null -eq $Journal){$Journal=New-Object 'System.Collections.Generic.List[object]'}
   if($Journal.Count -ne 0){return $false};$experiment=[Guid]::NewGuid().ToString('N')
@@ -197,4 +219,12 @@ function Test-PhaseACheckout([string]$Repository, [string]$ExpectedHead, [string
     catch { return $false }
   }
   return (Test-PhaseAPins $pins)
+}
+function Invoke-PhaseAManagerPreflightGate([hashtable]$Config,[string]$Repository,[string]$Base,$Journal,[scriptblock]$Checkout,[scriptblock]$AfterCheckout) {
+  if(-not (Test-PhaseAConfig $Config)){return 'CONFIGURATION_REJECTED'}
+  try {
+    if(-not (& $Checkout $Repository $Config.sha $Base $Journal)){return 'CHECKOUT_REJECTED'}
+    if($Journal.Count -ne 3 -or -not (Test-PhaseAPreflightJournal $Journal $Journal[0].experiment @('HEAD','ANCESTOR','CLEAN'))){return 'CHECKOUT_REJECTED'}
+  } catch { return 'CHECKOUT_REJECTED' }
+  return (& $AfterCheckout)
 }

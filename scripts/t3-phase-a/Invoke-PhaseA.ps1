@@ -5,7 +5,8 @@ param(
   [switch]$EnableAccountStage,
   [switch]$EnableActorStage,
   [switch]$EnableFilesystemStage,
-  [switch]$EnableSupervisorProbe
+  [switch]$EnableSupervisorProbe,
+  [hashtable]$TestHooks
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -29,10 +30,12 @@ $tokenJournal=New-Object 'System.Collections.Generic.List[object]'
 $actorJournal=New-Object 'System.Collections.Generic.List[object]'
 $preflightJournal=New-Object 'System.Collections.Generic.List[object]'
 $stage3Result=@{}; $hostedResult=@{}; $stage=$null; $adversarialStatus='NOT_RUN'; $supervision=@{injected='NOT_RUN';sameIdentity='NOT_RUN'}
-$reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
-  elseif (-not (Test-PhaseACheckout $repository $config.sha $RequiredBase $preflightJournal)) { "CHECKOUT_REJECTED" }
-  elseif (($adversarialStatus=Get-PhaseAAdversarialStatus (Invoke-PhaseAAdversarialControls)) -ceq 'FAIL') { 'ADVERSARIAL_CONTROL_FAILED' }
-  elseif ($EnableSupervisorProbe -and (($supervision=Invoke-PhaseASupervisorEvidence { try { $null=& (Join-Path $PSScriptRoot 'PhaseA.Job.Tests.ps1') } catch { throw 'SUPERVISOR_JOB_PROBE_FAILED' }; try { $null=& (Join-Path $PSScriptRoot 'PhaseA.Supervisor.Tests.ps1') } catch { throw 'SUPERVISOR_DEATH_PROBE_FAILED' }; return $true }).sameIdentity -cne 'SAME_IDENTITY_PASS' -or $supervision.injected -cne 'SIMULATED_PASS')) { $supervision.reason }
+if($null -ne $TestHooks -and ($TestHooks.Count -ne 2 -or $TestHooks.Checkout -isnot [scriptblock] -or $TestHooks.AfterCheckout -isnot [scriptblock])){throw 'TEST_HOOKS_REJECTED'}
+$checkoutCallback=if($null -ne $TestHooks){$TestHooks.Checkout}else{{param($repo,$sha,$base,$journal) Test-PhaseACheckout $repo $sha $base $journal}}
+$reason = Invoke-PhaseAManagerPreflightGate $config $repository $RequiredBase $preflightJournal $checkoutCallback {
+  if($null -ne $TestHooks){& $TestHooks.AfterCheckout}
+  elseif (($script:adversarialStatus=Get-PhaseAAdversarialStatus (Invoke-PhaseAAdversarialControls)) -ceq 'FAIL') { 'ADVERSARIAL_CONTROL_FAILED' }
+  elseif ($EnableSupervisorProbe -and (($script:supervision=Invoke-PhaseASupervisorEvidence { try { $null=& (Join-Path $PSScriptRoot 'PhaseA.Job.Tests.ps1') } catch { throw 'SUPERVISOR_JOB_PROBE_FAILED' }; try { $null=& (Join-Path $PSScriptRoot 'PhaseA.Supervisor.Tests.ps1') } catch { throw 'SUPERVISOR_DEATH_PROBE_FAILED' }; return $true }).sameIdentity -cne 'SAME_IDENTITY_PASS' -or $script:supervision.injected -cne 'SIMULATED_PASS')) { $script:supervision.reason }
   elseif ($EnableAccountStage -and -not $EnableSupervisorProbe) { 'SUPERVISOR_PROBE_REQUIRED' }
   elseif ($EnableFilesystemStage -and (-not $EnableAccountStage -or -not $EnableActorStage)) { 'STAGE3_GUARD_REJECTED' }
   elseif ($EnableActorStage -and -not $EnableAccountStage) { 'STAGE2_GUARD_REJECTED' }
@@ -44,10 +47,12 @@ $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
       $launchBackend=if ($EnableActorStage) { New-PhaseAActorJournalBackend (New-PhaseAStage2Backend) $actorJournal 'LIVE' } else { @{} }
       $fixtureBackend=if ($EnableFilesystemStage) { New-PhaseAStage3Backend } else { @{} }
       $supervisorBackend=if ($EnableActorStage) { New-PhaseAHostedSupervisorBackend } else { @{} }
-      $stage=Invoke-PhaseAStages $true ([bool]$EnableActorStage) $backend $launchBackend ([bool]$EnableFilesystemStage) $fixtureBackend $stage3Result ([bool]$EnableActorStage) $supervisorBackend $hostedResult $true
-      if ($stage -in @('STAGE1_COMPLETE','STAGE2_COMPLETE','STAGE3_COMPLETE')) { 'IMPLEMENTATION_INCOMPLETE' } else { $stage }
+      $script:stage=Invoke-PhaseAStages $true ([bool]$EnableActorStage) $backend $launchBackend ([bool]$EnableFilesystemStage) $fixtureBackend $stage3Result ([bool]$EnableActorStage) $supervisorBackend $hostedResult $true
+      if ($script:stage -in @('STAGE1_COMPLETE','STAGE2_COMPLETE','STAGE3_COMPLETE')) { 'IMPLEMENTATION_INCOMPLETE' } else { $script:stage }
     } catch { 'ACCOUNT_MANAGEMENT_UNAVAILABLE' }
   }
+}
+if($null -ne $TestHooks){return @{reason=$reason;journal=$preflightJournal}}
 $cases=[ordered]@{ accountIdentity='NOT_RUN'; brokerIdentity='NOT_RUN'; legacyIdentity='NOT_RUN'; actorIdentity='NOT_RUN'; containment='NOT_RUN'; acl='NOT_RUN';
   authorizedRead='NOT_RUN'; authorizedCreate='NOT_RUN'; authorizedReadback='NOT_RUN'; unauthorizedRead='NOT_RUN';
   unauthorizedWrite='NOT_RUN'; unauthorizedCreate='NOT_RUN'; proposedDelete='NOT_RUN'; proposedRename='NOT_RUN'; inventory='NOT_RUN'; insecureRejected='NOT_RUN';
