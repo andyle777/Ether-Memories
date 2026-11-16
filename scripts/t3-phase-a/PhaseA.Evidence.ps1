@@ -10,6 +10,9 @@ Set-StrictMode -Version Latest
 # Raw identity data remains in manager memory and is not written to the report.
 function Add-PhaseAActorEvidence($VerdictInput,$Journal,[string]$EvidenceClass) {
   if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $VerdictInput -isnot [Collections.IDictionary] -or $VerdictInput.cases -isnot [Collections.IDictionary]) { return }
+  # Manager-held actor journals include an actor-reported operation outcome.
+  # Without independent original-operation correlation they are not LIVE proof.
+  if ($EvidenceClass -ceq 'LIVE_OBSERVED') { return }
   $events=@($Journal)
   if ($events.Count -notin @(9,11)) { return }
   $sequence=@(@('broker','probe','allowed'),@('legacy','probe','allowed'),@('broker','Read','allowed'),@('broker','Create','allowed'),@('broker','Read','allowed'),@('legacy','Read','denied'),@('legacy','Overwrite','denied'),@('legacy','Create','denied'))

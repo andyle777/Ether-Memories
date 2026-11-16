@@ -294,6 +294,12 @@ try {
 }
 Write-Output 'PASS OIDC request endpoint rejection'
 $bridged=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $bridged $journal.ToArray() 'SIMULATED_PASS'
+$untrustedLiveActors=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAActorEvidence $untrustedLiveActors $journal.ToArray() 'LIVE_OBSERVED'
+foreach($key in @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding')) {
+  if($untrustedLiveActors.cases[$key].state -cne 'NOT_RUN') { throw "FORGED_LIVE_ACTOR_JOURNAL_PROMOTED_$key" }
+}
+Write-Output 'PASS uncorroborated LIVE actor journal cannot produce identity PASS'
 $bridgeVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $bridged '1' $true $true 'SIMULATED_PASS'
 if (-not (& $bridgeVerifier 'actorPidBinding' $bridged.cases.actorPidBinding $bridged)) { throw 'Valid journal proof not independently rechecked' }
 $forgedEntry=$bridged.cases.actorPidBinding.Clone(); $forgedEntry.proof=('f'*64)
@@ -336,6 +342,12 @@ foreach ($field in @('sid','primary','handleOpen','closed')) {
   if ($candidate.cases.brokerPrimaryToken.state -cne 'NOT_RUN') { throw "Invalid token evidence accepted: $field" }
 }
 Write-Output 'PASS independent primary-token evidence and failure controls (5)'
+$untrustedLiveTokens=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAPrimaryTokenEvidence $untrustedLiveTokens $tokenJournal $journal.ToArray() 'LIVE_OBSERVED'
+foreach($key in @('brokerPrimaryToken','legacyPrimaryToken')) {
+  if($untrustedLiveTokens.cases[$key].state -cne 'NOT_RUN') { throw "FORGED_LIVE_ACTOR_JOURNAL_PROMOTED_$key" }
+}
+Write-Output 'PASS LIVE primary-token evidence gated on trusted actor correlation'
 $tokenRecord=New-PhaseAManagerVerdictInput ('1'*40) '123'
 $audienceBefore=Get-PhaseAEvidenceAudience $tokenRecord '1'
 if (-not (Get-Command Test-PhaseAOidcEvidenceBinding -ErrorAction SilentlyContinue)) { throw 'OIDC final evidence recheck is missing' }
