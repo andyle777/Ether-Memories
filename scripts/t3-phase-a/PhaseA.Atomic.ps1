@@ -5,6 +5,32 @@ using System;
 using System.Text;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+public sealed class PhaseAHandleCloseResult {
+  public string ThreadClose { get; private set; }
+  public string ThreadError { get; private set; }
+  public string ProcessClose { get; private set; }
+  public string ProcessError { get; private set; }
+  internal PhaseAHandleCloseResult(string ts,string te,string ps,string pe) { ThreadClose=ts; ThreadError=te; ProcessClose=ps; ProcessError=pe; }
+}
+public sealed class PhaseAHandleCloseState : IDisposable {
+  readonly Func<string,int> close;
+  bool attempted;
+  string threadStatus="NOT_ATTEMPTED",threadError="NONE",processStatus="NOT_ATTEMPTED",processError="NONE";
+  internal PhaseAHandleCloseState(Func<string,int> callback) { if(callback==null) throw new ArgumentNullException("callback"); close=callback; }
+  public static PhaseAHandleCloseState CreateInjected(Func<string,int> callback) { return new PhaseAHandleCloseState(callback); }
+  static string Category(int code) { return code==5 ? "WIN32_ACCESS_DENIED" : code==6 ? "WIN32_INVALID_HANDLE" : "WIN32_OTHER"; }
+  void CloseOne(string role, out string status, out string error) {
+    try { int code=close(role); status=code==0 ? "CLOSED" : "FAILED"; error=code==0 ? "NONE" : Category(code); }
+    catch { status="FAILED"; error="CLOSE_EXCEPTION"; }
+  }
+  public PhaseAHandleCloseResult CloseObserved() {
+    lock(this) {
+      if(!attempted) { attempted=true; CloseOne("thread",out threadStatus,out threadError); CloseOne("process",out processStatus,out processError); }
+      return new PhaseAHandleCloseResult(threadStatus,threadError,processStatus,processError);
+    }
+  }
+  public void Dispose() { PhaseAHandleCloseResult r=CloseObserved(); if(r.ThreadClose!="CLOSED" || r.ProcessClose!="CLOSED") throw new InvalidOperationException("ATOMIC_HANDLE_CLOSE_FAILED"); }
+}
 public sealed class EtherPhaseAAtomic : IDisposable {
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
   struct StartupInfo {
@@ -29,9 +55,18 @@ public sealed class EtherPhaseAAtomic : IDisposable {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint code);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
-  readonly IntPtr job; IntPtr process, thread;
+  readonly IntPtr job; IntPtr process, thread; readonly PhaseAHandleCloseState closeState;
   public int Pid { get; private set; }
-  EtherPhaseAAtomic(IntPtr j, ProcessInfo p) { job=j; process=p.process; thread=p.thread; Pid=p.pid; }
+  EtherPhaseAAtomic(IntPtr j, ProcessInfo p) { job=j; process=p.process; thread=p.thread; Pid=p.pid; closeState=new PhaseAHandleCloseState(CloseOwned); }
+  int CloseOwned(string role) {
+    IntPtr handle;
+    if(role=="thread") { handle=thread; thread=IntPtr.Zero; }
+    else if(role=="process") { handle=process; process=IntPtr.Zero; }
+    else throw new ArgumentException("role");
+    if(handle==IntPtr.Zero) return -1;
+    if(CloseHandle(handle)) return 0;
+    int error=Marshal.GetLastWin32Error(); return error==0 ? -1 : error;
+  }
   static void Require(bool success) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error()); }
   public static EtherPhaseAAtomic CreateCurrentUser(IntPtr job, string app, string command) {
     IntPtr token=IntPtr.Zero;
@@ -85,12 +120,8 @@ public sealed class EtherPhaseAAtomic : IDisposable {
   public bool Exited() { return Wait(0); }
   public int ExitCode() { uint code; Require(GetExitCodeProcess(process,out code)); if (code==259) throw new InvalidOperationException("Process is still active"); return unchecked((int)code); }
   public void Terminate() { Require(TerminateProcess(process,1)); }
-  public void Dispose() {
-    int error=0;
-    if(thread!=IntPtr.Zero) { if(!CloseHandle(thread)) error=Marshal.GetLastWin32Error(); thread=IntPtr.Zero; }
-    if(process!=IntPtr.Zero) { if(!CloseHandle(process) && error==0) error=Marshal.GetLastWin32Error(); process=IntPtr.Zero; }
-    if(error!=0) throw new Win32Exception(error);
-  }
+  public PhaseAHandleCloseResult CloseObserved() { return closeState.CloseObserved(); }
+  public void Dispose() { closeState.Dispose(); }
 }
 '@
 }

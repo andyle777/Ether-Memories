@@ -11,7 +11,7 @@ foreach($role in @('broker','legacy')){
 }
 $script:case='success'
 $child=@{}
-$io=@{Wait={param($c,$ms) if($script:case -ceq 'wait'){throw 'secret'};if($script:case -ceq 'survive'){return $false};return $true};Exited={param($c) if($script:case -cin @('survive','contradictory')){return $false};return $true};ExitCode={param($c) return 0};Terminate={param($c)};Dispose={param($c) if($script:case -ceq 'close'){throw (New-Object ComponentModel.Win32Exception(6))}}}
+$io=@{Wait={param($c,$ms) if($script:case -ceq 'wait'){throw 'secret'};if($script:case -ceq 'survive'){return $false};return $true};Exited={param($c) if($script:case -cin @('survive','contradictory')){return $false};return $true};ExitCode={param($c) return 0};Terminate={param($c)};Dispose={param($c) if($script:case -ceq 'close'){throw (New-Object ComponentModel.Win32Exception(6))};return @{ProcessClose='CLOSED';ProcessError='NONE';ThreadClose='CLOSED';ThreadError='NONE'}}}
 foreach($kind in @('success','survive','wait','close','contradictory')){
  $script:case=$kind;$record=@{};$result=Invoke-PhaseAActorChildCleanup $child $record $io
  switch($kind){

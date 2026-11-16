@@ -145,8 +145,9 @@ function Invoke-PhaseAActorJobClose([IntPtr]$Job,[hashtable]$Record,[scriptblock
   try{$null=& $Close $Job;$Record.jobClose='CLOSED';return $true}catch{$Record.jobClose='FAILED';$Record.jobCloseError=Get-PhaseAActorErrorCategory $_;return $false}
 }
 function Invoke-PhaseAActorChildCleanup($Child,[hashtable]$Record,[hashtable]$Io=@{}) {
-  if($Io.Count -eq 0){$Io=@{Wait={param($c,$ms) $c.Wait([uint32]$ms)};Exited={param($c) $c.Exited()};ExitCode={param($c) $c.ExitCode()};Terminate={param($c) $c.Terminate()};Dispose={param($c) $c.Dispose()}}}
-  $Record.firstWait='NOT_RUN';$Record.finalWait='NOT_RUN';$Record.termination='NOT_REQUESTED';$Record.exitState='UNKNOWN';$Record.exitCode=$null;$Record.atomicHandleClose='NOT_ATTEMPTED';$Record.error='NONE'
+  $native=($Io.Count -eq 0)
+  if($native){$Io=@{Wait={param($c,$ms) $c.Wait([uint32]$ms)};Exited={param($c) $c.Exited()};ExitCode={param($c) $c.ExitCode()};Terminate={param($c) $c.Terminate()};Dispose={param($c) $c.CloseObserved()}}}
+  $Record.firstWait='NOT_RUN';$Record.finalWait='NOT_RUN';$Record.termination='NOT_REQUESTED';$Record.exitState='UNKNOWN';$Record.exitCode=$null;$Record.atomicHandleClose='NOT_ATTEMPTED';$Record.processClose='NOT_ATTEMPTED';$Record.processCloseError='NONE';$Record.threadClose='NOT_ATTEMPTED';$Record.threadCloseError='NONE';$Record.error='NONE'
   $confirmed=$false;$cleanupFailed=$false
   try {
     $signal=& $Io.Wait $Child 5000;if($signal -isnot [bool]){throw 'invalid wait'}
@@ -155,7 +156,14 @@ function Invoke-PhaseAActorChildCleanup($Child,[hashtable]$Record,[hashtable]$Io
     if(-not $signal){$Record.finalWait='TIMEOUT';try{$exited=& $Io.Exited $Child;if($exited -is [bool] -and -not $exited){$Record.exitState='ALIVE'}}catch{}}
     else {$Record.finalWait='SIGNALED';$exited=& $Io.Exited $Child;if($exited -is [bool] -and $exited){$confirmed=$true;$Record.exitState='EXITED';try{$code=& $Io.ExitCode $Child;if($code -isnot [int]){throw 'invalid exit code'};$Record.exitCode=$code}catch{$cleanupFailed=$true;$Record.error=Get-PhaseAActorErrorCategory $_}}else{$Record.error='EXIT_UNCONFIRMED'}}
   }catch{if($Record.firstWait -ceq 'NOT_RUN'){$Record.firstWait='FAILED'};$Record.finalWait='FAILED';$Record.error=Get-PhaseAActorErrorCategory $_}
-  if($confirmed){try{$null=& $Io.Dispose $Child;$Record.atomicHandleClose='CLOSED'}catch{$Record.atomicHandleClose='FAILED';$Record.error=Get-PhaseAActorErrorCategory $_;$cleanupFailed=$true}}
+  if($confirmed){
+    try {
+      $close=& $Io.Dispose $Child
+      if(($native -and $close -isnot [PhaseAHandleCloseResult]) -or $null -eq $close -or $close.ProcessClose -cnotin @('CLOSED','FAILED') -or $close.ThreadClose -cnotin @('CLOSED','FAILED') -or $close.ProcessError -cnotin @('NONE','WIN32_ACCESS_DENIED','WIN32_INVALID_HANDLE','WIN32_OTHER','CLOSE_EXCEPTION') -or $close.ThreadError -cnotin @('NONE','WIN32_ACCESS_DENIED','WIN32_INVALID_HANDLE','WIN32_OTHER','CLOSE_EXCEPTION') -or (($close.ProcessClose -ceq 'CLOSED') -ne ($close.ProcessError -ceq 'NONE')) -or (($close.ThreadClose -ceq 'CLOSED') -ne ($close.ThreadError -ceq 'NONE'))){throw 'close observation invalid'}
+      $Record.processClose=$close.ProcessClose;$Record.processCloseError=$close.ProcessError;$Record.threadClose=$close.ThreadClose;$Record.threadCloseError=$close.ThreadError
+      if($close.ProcessClose -ceq 'CLOSED' -and $close.ThreadClose -ceq 'CLOSED'){$Record.atomicHandleClose='CLOSED'}else{$Record.atomicHandleClose='FAILED';$cleanupFailed=$true;$Record.error=if($close.ThreadClose -ceq 'FAILED'){$close.ThreadError}else{$close.ProcessError}}
+    }catch{$Record.atomicHandleClose='FAILED';$Record.processClose='UNKNOWN';$Record.threadClose='UNKNOWN';$Record.error=Get-PhaseAActorErrorCategory $_;$cleanupFailed=$true}
+  }
   return @{confirmed=$confirmed;cleanupFailed=$cleanupFailed}
 }
 function New-PhaseAStage2Backend {
