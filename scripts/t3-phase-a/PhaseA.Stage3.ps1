@@ -4,6 +4,12 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.ReadProcess.ps1"
 function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Token,[string]$ExpectedSid,[string]$Operation,[string]$TargetId,[string]$EvidenceClass) {
   $failure=@{status='UNVERIFIED';reason='WITNESS_UNAVAILABLE';evidence=$EvidenceClass}
+  # Until a trusted producer-to-verifier bridge independently correlates the
+  # original actor operation, a process-reported witness result is not LIVE proof.
+  # Never call the witness probe or promote a forged LIVE result into PASS/FAIL.
+  if ($EvidenceClass -ceq 'LIVE') {
+    return @{status='UNVERIFIED';reason='ORIGINAL_OPERATION_UNCORROBORATED';evidence='LIVE'}
+  }
   try {
     if ($EvidenceClass -cnotin @('LIVE','INJECTED') -or $Token.sid -cne $ExpectedSid -or [string]::IsNullOrWhiteSpace($ExpectedSid) -or $Operation -cnotin @('Read','Overwrite','Create') -or $TargetId -cnotin @('protectedFile','deniedFile','controlFile','authorizedProbeFile','controlProbeFile')) { return $failure }
     if (($Operation -ceq 'Create' -and $TargetId -cnotin @('deniedFile','authorizedProbeFile','controlProbeFile')) -or ($Operation -ceq 'Overwrite' -and $TargetId -cnotin @('protectedFile','controlFile')) -or ($Operation -ceq 'Read' -and $TargetId -cnotin @('protectedFile','controlFile'))) { return $failure }
