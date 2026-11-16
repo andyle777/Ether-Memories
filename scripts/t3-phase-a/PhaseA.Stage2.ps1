@@ -105,7 +105,7 @@ function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashta
 }
 function Invoke-PhaseABoundProcessLaunch($processRecord,[scriptblock]$launch) {
   $processRecord.launchAttempted=$true
-  try{$child=& $launch;$processRecord.launchResult='CREATED';return $child}catch{$processRecord.launchResult='CREATE_FAILED';throw}
+  try{$child=& $launch;$processRecord.launchResult='CREATED';return $child}catch{$processRecord.launchResult='CREATE_FAILED';$processRecord.launchError=Get-PhaseAActorErrorCategory $_;throw}
 }
 function Invoke-PhaseAProcessTokenPair($process,$processRecord,$owner,[scriptblock]$inspect) {
   $processRecord.inspectionAttempted=$true
@@ -122,7 +122,44 @@ function Invoke-PhaseAProcessTokenPair($process,$processRecord,$owner,[scriptblo
     $owner.launchFailure='PROCESS_OBSERVATION_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'
   }
 }
+function New-PhaseAActorProcessRecord([hashtable]$Owner,[hashtable]$Account,[string]$Experiment,[string]$Attempt,[ValidateSet('LIVE','INJECTED')][string]$Source) {
+  if($Owner.role -cne $Account.role -or $Owner.accountSid -cne $Account.sid -or $Account.role -cnotin @('broker','legacy') -or $Experiment -cnotmatch '^[0-9a-f]{32}$' -or $Attempt -cnotmatch '^[0-9a-f]{32}$'){throw 'STAGE2_OBSERVATION_REJECTED'}
+  $record=@{source=$Source;experiment=$Experiment;attempt=$Attempt;role=$Account.role;accountSid=$Account.sid;launchAttempted=$false;launchResult='NOT_ATTEMPTED';launchError='NONE';inspectionAttempted=$false;inspectionResult='NOT_ATTEMPTED';cleanup='NOT_OBSERVED';lifecycle=@{jobCreate='NOT_ATTEMPTED';jobCreateError='NONE';jobClose='NOT_ATTEMPTED';jobCloseError='NONE';executionWait='NOT_RUN';executionExitCode=$null;child=$null;processInspectionDispose='NOT_ATTEMPTED';processInspectionDisposeError='NONE';operationFailure='NONE';cleanupDependency='NOT_OBSERVED'}}
+  $Owner.processObservation=$record
+  if(-not $Owner.ContainsKey('processObservations')){$Owner.processObservations=New-Object 'System.Collections.Generic.List[object]'}
+  $Owner.processObservations.Add($record)
+  if($Source -ceq 'LIVE'){$null=$script:PhaseATrustedProcessTokenRecords.Add($record)}
+  return $record
+}
+function Get-PhaseAActorErrorCategory($ErrorRecord) {
+  $base=$ErrorRecord.Exception.GetBaseException()
+  if($base -is [ComponentModel.Win32Exception]){if($base.NativeErrorCode -eq 5){return 'WIN32_ACCESS_DENIED'};if($base.NativeErrorCode -eq 6){return 'WIN32_INVALID_HANDLE'};return 'WIN32_OTHER'}
+  return 'NON_WIN32'
+}
+function Save-PhaseAActorOperationFailure([hashtable]$Record,$ErrorRecord) {
+  $failure=$ErrorRecord.Exception.GetBaseException().Message
+  $Record.lifecycle.operationFailure=if($failure -cin @('STAGE2_TIMEOUT','STAGE2_OBSERVATION_REJECTED','STAGE2_CLEANUP_FAILED')){$failure}else{'OPERATION_FAILED'}
+  if($Record.lifecycle.executionWait -ceq 'ATTEMPTED'){$Record.lifecycle.executionWait='FAILED'}
+}
+function Invoke-PhaseAActorJobClose([IntPtr]$Job,[hashtable]$Record,[scriptblock]$Close={param($j) [EtherPhaseAJob]::Close($j)}) {
+  try{$null=& $Close $Job;$Record.jobClose='CLOSED';return $true}catch{$Record.jobClose='FAILED';$Record.jobCloseError=Get-PhaseAActorErrorCategory $_;return $false}
+}
+function Invoke-PhaseAActorChildCleanup($Child,[hashtable]$Record,[hashtable]$Io=@{}) {
+  if($Io.Count -eq 0){$Io=@{Wait={param($c,$ms) $c.Wait([uint32]$ms)};Exited={param($c) $c.Exited()};ExitCode={param($c) $c.ExitCode()};Terminate={param($c) $c.Terminate()};Dispose={param($c) $c.Dispose()}}}
+  $Record.firstWait='NOT_RUN';$Record.finalWait='NOT_RUN';$Record.termination='NOT_REQUESTED';$Record.exitState='UNKNOWN';$Record.exitCode=$null;$Record.atomicHandleClose='NOT_ATTEMPTED';$Record.error='NONE'
+  $confirmed=$false;$cleanupFailed=$false
+  try {
+    $signal=& $Io.Wait $Child 5000;if($signal -isnot [bool]){throw 'invalid wait'}
+    $Record.firstWait=if($signal){'SIGNALED'}else{'TIMEOUT'}
+    if(-not $signal){$Record.termination='REQUESTED';$null=& $Io.Terminate $Child;$signal=& $Io.Wait $Child 5000;if($signal -isnot [bool]){throw 'invalid wait'}}
+    if(-not $signal){$Record.finalWait='TIMEOUT';try{$exited=& $Io.Exited $Child;if($exited -is [bool] -and -not $exited){$Record.exitState='ALIVE'}}catch{}}
+    else {$Record.finalWait='SIGNALED';$exited=& $Io.Exited $Child;if($exited -is [bool] -and $exited){$confirmed=$true;$Record.exitState='EXITED';try{$code=& $Io.ExitCode $Child;if($code -isnot [int]){throw 'invalid exit code'};$Record.exitCode=$code}catch{$cleanupFailed=$true;$Record.error=Get-PhaseAActorErrorCategory $_}}else{$Record.error='EXIT_UNCONFIRMED'}}
+  }catch{if($Record.firstWait -ceq 'NOT_RUN'){$Record.firstWait='FAILED'};$Record.finalWait='FAILED';$Record.error=Get-PhaseAActorErrorCategory $_}
+  if($confirmed){try{$null=& $Io.Dispose $Child;$Record.atomicHandleClose='CLOSED'}catch{$Record.atomicHandleClose='FAILED';$Record.error=Get-PhaseAActorErrorCategory $_;$cleanupFailed=$true}}
+  return @{confirmed=$confirmed;cleanupFailed=$cleanupFailed}
+}
 function New-PhaseAStage2Backend {
+  $script:PhaseAActorExperimentId=[Guid]::NewGuid().ToString('N')
   $backend=@{ Run={ param($account,$token,$operation,$operationTarget)
     $common=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     if ([string]::IsNullOrWhiteSpace($common)) { throw 'stage directory unavailable' }
@@ -150,14 +187,11 @@ function New-PhaseAStage2Backend {
       $nonce=[Guid]::NewGuid().ToString('N'); $exe=Join-Path $PSHOME 'powershell.exe'
       foreach ($path in @($actor,$ready,$gate,$result,$operationTarget,$exe,$root)) { if ($path.Contains('"')) { throw 'unsafe path' } }
       $cmd='"'+$exe+'" -NoProfile -NonInteractive -File "'+$actor+'" -Operation '+$operation+' -Target "'+$operationTarget+'" -Ready "'+$ready+'" -Gate "'+$gate+'" -Result "'+$result+'" -Nonce '+$nonce
-      $job=[EtherPhaseAJob]::Create()
       if(-not (Get-Variable -Name PhaseATokenOwners -Scope Script -ErrorAction SilentlyContinue) -or -not $script:PhaseATokenOwners.ContainsKey($token)){throw 'STAGE2_OBSERVATION_REJECTED'}
       $owner=$script:PhaseATokenOwners[$token]
-      $processRecord=@{source='LIVE';role=$account.role;accountSid=$account.sid;launchAttempted=$false;launchResult='NOT_ATTEMPTED';inspectionAttempted=$false;inspectionResult='NOT_ATTEMPTED';cleanup='NOT_OBSERVED'}
-      $owner.processObservation=$processRecord
-      if(-not $owner.ContainsKey('processObservations')){$owner.processObservations=New-Object 'System.Collections.Generic.List[object]'}
-      $owner.processObservations.Add($processRecord)
-      $null=$script:PhaseATrustedProcessTokenRecords.Add($processRecord)
+      $processRecord=New-PhaseAActorProcessRecord $owner $account $script:PhaseAActorExperimentId $nonce 'LIVE'
+      $processRecord.lifecycle.jobCreate='ATTEMPTED'
+      try{$job=[EtherPhaseAJob]::Create();$processRecord.lifecycle.jobCreate='CREATED'}catch{$processRecord.lifecycle.jobCreate='FAILED';$processRecord.lifecycle.jobCreateError=Get-PhaseAActorErrorCategory $_;throw}
       $launchHandle=$token.handle;$launchHandle.DangerousAddRef([ref]$tokenRef);$tokenPointer=$launchHandle.DangerousGetHandle()
       try{$beforeLaunch=[EtherPhaseANative]::InspectTokenHandle($tokenPointer)}catch{$owner.launchFailure='TOKEN_STATISTICS_FAILED';throw 'STAGE2_OBSERVATION_REJECTED'}
       if(-not (Test-PhaseAOwnedLaunchToken $owner $account $beforeLaunch)){$owner.launchFailure='TOKEN_BINDING_REJECTED';throw 'STAGE2_OBSERVATION_REJECTED'}
@@ -191,8 +225,9 @@ function New-PhaseAStage2Backend {
           -not [DateTimeOffset]::TryParse([string]$record.createdAt,[ref]$t1) -or
           -not [DateTimeOffset]::TryParse([string]$observed.createdAt,[ref]$t2) -or $t1 -ne $t2) { throw 'STAGE2_OBSERVATION_REJECTED' }
       [IO.File]::WriteAllText($gate,'go')
-      if (-not $child.Wait(20000)) { throw 'STAGE2_TIMEOUT' }
-      $safeToRemove=$true; $code=$child.ExitCode()
+      $processRecord.lifecycle.executionWait='ATTEMPTED'
+      if (-not $child.Wait(20000)) { $processRecord.lifecycle.executionWait='TIMEOUT';throw 'STAGE2_TIMEOUT' }
+      $processRecord.lifecycle.executionWait='SIGNALED';$safeToRemove=$true; $code=$child.ExitCode();$processRecord.lifecycle.executionExitCode=$code
       if (-not [IO.File]::Exists($result) -or (Get-Item -LiteralPath $result).Length -gt 4096) { throw 'actor result missing' }
       $final=Get-Content -LiteralPath $result -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
       $obs=@{ role=$account.role; expectedSid=$account.sid; observedSid=$observed.sid; reportedSid=$final.sid;
@@ -204,19 +239,22 @@ function New-PhaseAStage2Backend {
       if ($final.PSObject.Properties.Name -contains 'errorCategory' -and $final.errorCategory -cin @('NONE','ACCESS_DENIED','FILE_NOT_FOUND','PATH_NOT_FOUND','INVALID_PATH','IO_ERROR','OTHER')) { $obs.errorCategory=$final.errorCategory }
       if ($final.PSObject.Properties.Name -contains 'errorCode' -and $final.errorCode -is [int] -and $final.errorCode -ge 0 -and $final.errorCode -le 65535) { $obs.errorCode=$final.errorCode }
       return $obs
+    } catch {
+      if($processRecord){Save-PhaseAActorOperationFailure $processRecord $_}
+      throw
     } finally {
       if($tokenRef){try{$launchHandle.DangerousRelease()}catch{$cleanupFailed=$true}}
-      if ($job -ne [IntPtr]::Zero) { try { [EtherPhaseAJob]::Close($job) } catch { $cleanupFailed=$true } }
+      if ($job -ne [IntPtr]::Zero) { if($processRecord){if(-not (Invoke-PhaseAActorJobClose $job $processRecord.lifecycle)){$cleanupFailed=$true}}else{try{[EtherPhaseAJob]::Close($job)}catch{$cleanupFailed=$true}} }
       if ($child) {
-        try {
-          if (-not $child.Wait(5000)) { $child.Terminate(); if (-not $child.Wait(5000)) { throw 'termination not confirmed' } }
-          $safeToRemove=$true
-        } catch { $safeToRemove=$false }
-        if ($safeToRemove) { try { $child.Dispose() } catch { $cleanupFailed=$true } }
+        $childEvidence=@{};if($processRecord){$processRecord.lifecycle.child=$childEvidence}
+        $childResult=Invoke-PhaseAActorChildCleanup $child $childEvidence
+        $safeToRemove=$childResult.confirmed;if($childResult.cleanupFailed){$cleanupFailed=$true}
       }
-      if ($process) { try { $process.Dispose() } catch { $cleanupFailed=$true } }
+      if ($process) { try { $process.Dispose();if($processRecord){$processRecord.lifecycle.processInspectionDispose='DISPOSE_RETURNED'} } catch { $cleanupFailed=$true;if($processRecord){$processRecord.lifecycle.processInspectionDispose='FAILED';$processRecord.lifecycle.processInspectionDisposeError=Get-PhaseAActorErrorCategory $_} } }
       if($processRecord){$processRecord.cleanup=if(-not $safeToRemove){'CHILD_UNCONFIRMED'}elseif($cleanupFailed){'RESOURCE_FAILED'}else{'PROCESS_CONFIRMED'}}
-      if (-not $safeToRemove) { throw 'STAGE2_CHILD_UNCONFIRMED' }
+      if(-not $safeToRemove -or $cleanupFailed){$script:PhaseAUnconfirmedActorResources=@{child=$child;process=$process;job=$(if($processRecord -and $processRecord.lifecycle.jobClose -ceq 'CLOSED'){[IntPtr]::Zero}else{$job});root=$root}}
+      if (-not $safeToRemove) {if($processRecord){$processRecord.lifecycle.cleanupDependency='RETAIN'};throw 'STAGE2_CHILD_UNCONFIRMED' }
+      if ($cleanupFailed) {if($processRecord){$processRecord.lifecycle.cleanupDependency='RETAIN'};throw 'STAGE2_CLEANUP_FAILED'}
       if ($createdRoot -and [IO.Directory]::Exists($root)) {
         $resolved=[IO.Path]::GetFullPath($root)
         if (-not $resolved.StartsWith($parent+'\',[StringComparison]::OrdinalIgnoreCase) -or -not [IO.Path]::GetFileName($resolved).StartsWith('ether-phase-a-actor-')) { throw 'STAGE2_CLEANUP_FAILED' }
@@ -233,7 +271,8 @@ function New-PhaseAStage2Backend {
           [IO.Directory]::Delete($resolved,$false)
         } catch { $cleanupFailed=$true }
       }
-      if ($cleanupFailed) { if($processRecord){$processRecord.cleanup='RESOURCE_FAILED'};throw 'STAGE2_CLEANUP_FAILED' }
+      if ($cleanupFailed) { if($processRecord){$processRecord.cleanup='RESOURCE_FAILED';$processRecord.lifecycle.cleanupDependency='RETAIN'};throw 'STAGE2_CLEANUP_FAILED' }
+      if($processRecord){$processRecord.lifecycle.cleanupDependency='RELEASE_ELIGIBLE'}
     }
   } }
   if(-not (Get-Variable -Name PhaseATrustedActorBackends -Scope Script -ErrorAction SilentlyContinue)){$script:PhaseATrustedActorBackends=New-Object 'System.Collections.Generic.Dictionary[object,object]'}
