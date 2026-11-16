@@ -280,6 +280,11 @@ function Add-PhaseAStage3Evidence($VerdictInput,$Evidence,[string]$EvidenceClass
         $VerdictInput.cases.aclInspection=@{state=$est.state;evidence=$EvidenceClass;reason=$est.reason;proof=$hash}
       }
     }
+    # Filesystem inventory and ACL proof above retain their existing contracts.
+    # Access verdicts below rely on an actor journal plus a separate witness
+    # attempt; neither independently corroborates the original actor operation.
+    # Until the trusted observer is connected, LIVE access decisions stay NOT_RUN.
+    if ($EvidenceClass -ceq 'LIVE_OBSERVED') { return }
     $probes=@($ActorJournal | Where-Object { $_.role -ceq 'legacy' -and $_.operation -ceq 'probe' })
     if ($probes.Count -ne 1) { return }
     $probe=$probes[0]; $probeObs=$probe.observation

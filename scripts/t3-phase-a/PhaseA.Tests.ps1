@@ -441,6 +441,10 @@ $entry=@{control='unauthorizedWrite';operation='Overwrite';target='protectedFile
 $fs=@{cleanupVerified=$true;aclInspection=@{expected='D:P(A;;FA;;;SY)';actual='D:P(A;;FA;;;SY)';protected=$true};unauthorizedWrite=$entry}
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fs 'SIMULATED_PASS' $journal.ToArray()
 if($v.cases.aclInspection.state -cne 'NOT_RUN' -or $v.cases.unauthorizedWrite.state -cne 'FAIL' -or $v.cases.unauthorizedWrite.reason -cne 'VIOLATION'){throw 'Stage 3 verified outcomes not mapped'}
+$forgedLiveWrite=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAStage3Evidence $forgedLiveWrite $fs 'LIVE_OBSERVED' $journal.ToArray()
+if($forgedLiveWrite.cases.unauthorizedWrite.state -cne 'NOT_RUN') { throw 'FORGED_LIVE_ACTOR_JOURNAL_PROMOTED_WRITE_FAIL' }
+Write-Output 'PASS synthetic original write cannot manufacture LIVE FAIL'
 $denied=$entry.Clone();$denied.control='unauthorizedRead';$denied.operation='Read';$denied.observation=$journal[5].observation.Clone();$denied.observation.errorCategory='ACCESS_DENIED'
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v @{cleanupVerified=$true;unauthorizedRead=$denied} 'SIMULATED_PASS' $journal.ToArray()
 if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'Uncorroborated denial promoted'}
@@ -520,6 +524,19 @@ foreach($where in @('witness','authorizedRead','permissiveRead')) {
 }
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $processRead 'SIMULATED_PASS' $journal.ToArray()
 if($v.cases.unauthorizedRead.state -cne 'PASS'){throw 'process witness was not mapped'}
+$forgedLiveRead=$processRead.Clone()
+$forgedLiveRead.unauthorizedRead=$processRead.unauthorizedRead.Clone()
+$forgedLiveRead.unauthorizedRead.witness=$processRead.unauthorizedRead.witness.Clone()
+$forgedLiveRead.unauthorizedRead.witness.evidence='LIVE'
+$forgedLiveRead.witnessControls=@{}
+foreach($key in @('authorizedRead','permissiveRead')) {
+  $forgedLiveRead.witnessControls[$key]=$processRead.witnessControls[$key].Clone()
+  $forgedLiveRead.witnessControls[$key].evidence='LIVE'
+}
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAStage3Evidence $v $forgedLiveRead 'LIVE_OBSERVED' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'NOT_RUN') { throw 'FORGED_LIVE_SEPARATE_WITNESS_PROMOTED_READ_PASS' }
+Write-Output 'PASS forged process witness cannot manufacture LIVE read PASS'
 $bad=$processRead.Clone();$bad.unauthorizedRead=$processRead.unauthorizedRead.Clone();$bad.unauthorizedRead.witness=$processRead.unauthorizedRead.witness.Clone();$bad.unauthorizedRead.witness.pipeClientPid=124
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $bad 'SIMULATED_PASS' $journal.ToArray()
 if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'wrong client PID accepted'}
@@ -538,6 +555,18 @@ foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile',6,$true,'au
  $rec.witness=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-2';operation=$spec[1];target=$spec[2];outcome='ACCESS_DENIED';nativeError=5;execution='PROCESS';processVerified=$true;terminated=$true;handlesClosed=$true;pid=123;pipeClientPid=123;createdAt='2026-01-01T00:00:00Z';nonce=('a'*32)}
  $fsCase=@{cleanupVerified=$true;aclInspection=$readEvidence.aclInspection;witnessControls=$ctrl};$fsCase[$spec[0]]=$rec
  $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fsCase 'SIMULATED_PASS' $journal.ToArray();if($v.cases[$spec[0]].state -cne 'PASS'){throw "process denial not mapped $($spec[0])"}
+  $forgedLiveOp=$fsCase.Clone()
+  $forgedLiveOp[$spec[0]]=$rec.Clone()
+  $forgedLiveOp[$spec[0]].witness=$rec.witness.Clone()
+  $forgedLiveOp[$spec[0]].witness.evidence='LIVE'
+  $forgedLiveOp.witnessControls=@{}
+  foreach($key in @($ctrl.Keys)) {
+    $forgedLiveOp.witnessControls[$key]=$ctrl[$key].Clone()
+    $forgedLiveOp.witnessControls[$key].evidence='LIVE'
+  }
+  $fake=New-PhaseAManagerVerdictInput ('1'*40) '123'
+  Add-PhaseAStage3Evidence $fake $forgedLiveOp 'LIVE_OBSERVED' $journal.ToArray()
+  if($fake.cases[$spec[0]].state -cne 'NOT_RUN') { throw "FORGED_LIVE_SEPARATE_WITNESS_PROMOTED_$($spec[0])" }
  $proofVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $v '1' $true $true 'SIMULATED_PASS' @() @{} $fsCase
  if(-not (& $proofVerifier $spec[0] $v.cases[$spec[0]] $v)){throw 'process proof not rechecked'}
  foreach($field in @('nonce','pid','cleanup','inventory','control','parent','error')) {
