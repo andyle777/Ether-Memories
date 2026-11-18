@@ -20,6 +20,29 @@ function Invoke-PhaseAActorOperation($Account, $Token, [hashtable]$Backend, [str
       -not (Test-ActorObservation $obs $Account.role $ExpectedOutcome)) { throw 'STAGE2_OBSERVATION_REJECTED' }
   return $obs
 }
+# Offline preparation only. LIVE requires a separately reviewed, authorized
+# preprovisioned-token acquisition and manager-owned lifecycle integration.
+function Invoke-PhaseABoundedObserverActor($Account,$Token,[hashtable]$Backend,[hashtable]$Fixture,[string]$Source) {
+  if($Source -ceq 'LIVE'){throw 'OBSERVER_LIVE_DISABLED'}
+  if($Source -cne 'INJECTED' -or $Account -isnot [hashtable] -or $Token -isnot [hashtable] -or -not $Account.ContainsKey('sid') -or -not $Token.ContainsKey('sid') -or [string]::IsNullOrWhiteSpace($Account.sid) -or $Account.sid -cne $Token.sid -or -not $Fixture.ContainsKey('controlFile') -or -not $Fixture.ContainsKey('protectedFile') -or [string]::IsNullOrWhiteSpace($Fixture.controlFile) -or [string]::IsNullOrWhiteSpace($Fixture.protectedFile) -or $Fixture.controlFile -ceq $Fixture.protectedFile){throw 'OBSERVER_INPUT_REJECTED'}
+  $read=Invoke-PhaseAActorOperation $Account $Token $Backend 'Read' $Fixture.controlFile 'allowed'
+  $denied=Invoke-PhaseAActorOperation $Account $Token $Backend 'Read' $Fixture.protectedFile 'denied'
+  return @{status='UNVERIFIED';reason='INDEPENDENT_OBSERVATION_MISSING';evidence='INJECTED';read=$read;deniedOpen=$denied}
+}
+# Injected preparation only. The existing Stage 2 backend supplies containment
+# and token checks in a future separately authorised native path. Neither actor's
+# self-report is independent original-operation evidence.
+function Invoke-PhaseAGateBActors($ReadAccount,$ReadToken,$DeniedAccount,$DeniedToken,[hashtable]$Backend,[hashtable]$Fixture,[string]$Attempt,[string]$Experiment,[string]$Source) {
+  if($Source -ceq 'LIVE'){throw 'OBSERVER_LIVE_DISABLED'}
+  if($Source -cne 'INJECTED' -or $ReadAccount -isnot [hashtable] -or $DeniedAccount -isnot [hashtable] -or $ReadToken -isnot [hashtable] -or $DeniedToken -isnot [hashtable] -or
+     [string]::IsNullOrWhiteSpace($Attempt) -or [string]::IsNullOrWhiteSpace($Experiment) -or -not $Fixture.ContainsKey('fixtureId') -or [string]::IsNullOrWhiteSpace($Fixture.fixtureId) -or
+     -not $Fixture.ContainsKey('controlFile') -or -not $Fixture.ContainsKey('protectedFile') -or [string]::IsNullOrWhiteSpace($Fixture.controlFile) -or [string]::IsNullOrWhiteSpace($Fixture.protectedFile) -or $Fixture.controlFile -ceq $Fixture.protectedFile -or
+     -not $ReadAccount.ContainsKey('sid') -or -not $DeniedAccount.ContainsKey('sid') -or -not $ReadToken.ContainsKey('sid') -or -not $DeniedToken.ContainsKey('sid') -or
+     [string]::IsNullOrWhiteSpace($ReadAccount.sid) -or [string]::IsNullOrWhiteSpace($DeniedAccount.sid) -or $ReadAccount.sid -ceq $DeniedAccount.sid -or $ReadAccount.sid -cne $ReadToken.sid -or $DeniedAccount.sid -cne $DeniedToken.sid) {throw 'OBSERVER_INPUT_REJECTED'}
+  $read=Invoke-PhaseAActorOperation $ReadAccount $ReadToken $Backend 'Read' $Fixture.controlFile 'allowed'
+  $denied=Invoke-PhaseAActorOperation $DeniedAccount $DeniedToken $Backend 'Read' $Fixture.protectedFile 'denied'
+  return @{status='UNVERIFIED';reason='INDEPENDENT_OBSERVATION_MISSING';evidence='INJECTED';fixtureId=$Fixture.fixtureId;attempt=$Attempt;experiment=$Experiment;read=$read;deniedOpen=$denied}
+}
 function Invoke-PhaseAStage2($Accounts, $Tokens, [hashtable]$Backend) {
   if ($Accounts.Count -ne 2 -or $Tokens.Count -ne 2) { return 'STAGE2_OBSERVATION_REJECTED' }
   foreach ($i in 0,1) {

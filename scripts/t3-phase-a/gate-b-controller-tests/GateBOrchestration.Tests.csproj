@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../PhaseA.EtwNative.Preparation.cs" Link="PhaseA.EtwNative.Preparation.cs" />
+    <Compile Include="../PhaseA.EtwLifecycle.cs" Link="PhaseA.EtwLifecycle.cs" />
+    <Compile Include="../PhaseA.EtwLifecycle.TestBackend.cs" Link="PhaseA.EtwLifecycle.TestBackend.cs" />
+    <Compile Include="../gate-b-controller/GateBWorkload.cs" Link="GateBWorkload.cs" />
+    <Compile Include="../gate-b-controller/GateBReceipt.cs" Link="GateBReceipt.cs" />
+    <Compile Include="../gate-b-controller/GateB003.TestBackend.cs" Link="GateB003.TestBackend.cs" />
+    <Compile Include="../gate-b-controller/GateBOrchestration.cs" Link="GateBOrchestration.cs" />
+    <Compile Include="../gate-b-controller/GateBSerializedReceipt.cs" Link="GateBSerializedReceipt.cs" />
+  </ItemGroup>
+</Project>

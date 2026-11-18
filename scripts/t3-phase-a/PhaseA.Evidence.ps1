@@ -1,5 +1,8 @@
 function Test-PhaseAReadWitnessCleanup($Record,[string]$Source) {
  if($Record -isnot [hashtable]){return $false}
+ # LIVE witness provenance and retained lifecycle correlation are not yet connected.
+ # Until the producer-to-verifier bridge exists, no relabeled object is live proof.
+ if($Source -ceq 'LIVE'){return $false}
  $parsed=[DateTimeOffset]::MinValue
  if($Record.ContainsKey('execution') -and $Record.execution -ceq 'PROCESS'){return ($Record.ContainsKey('processVerified') -and $Record.processVerified -is [bool] -and $Record.processVerified -and $Record.ContainsKey('terminated') -and $Record.terminated -is [bool] -and $Record.terminated -and $Record.ContainsKey('pid') -and $Record.pid -is [int] -and $Record.pid -gt 0 -and $Record.ContainsKey('pipeClientPid') -and $Record.pipeClientPid -is [int] -and $Record.pipeClientPid -eq $Record.pid -and $Record.ContainsKey('createdAt') -and $Record.createdAt -is [string] -and [DateTimeOffset]::TryParse($Record.createdAt,[ref]$parsed) -and $Record.ContainsKey('nonce') -and $Record.nonce -cmatch '^[0-9a-f]{32}$')}
  if($Source -ceq 'LIVE'){return $false}
@@ -35,6 +38,8 @@ function Get-PhaseAProcessTokenObservation($item,$r,[string]$source) {
 # Raw identity data remains in manager memory and is not written to the report.
 function Add-PhaseAActorEvidence($VerdictInput,$Journal,[string]$EvidenceClass) {
   if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $VerdictInput -isnot [Collections.IDictionary] -or $VerdictInput.cases -isnot [Collections.IDictionary]) { return }
+  # Actor journal operation results are not independent LIVE observations.
+  if ($EvidenceClass -ceq 'LIVE_OBSERVED') { return }
   $events=@($Journal)
   if ($events.Count -notin @(9,11)) { return }
   $sequence=@(@('broker','probe','allowed'),@('legacy','probe','allowed'),@('broker','Read','allowed'),@('broker','Create','allowed'),@('broker','Read','allowed'),@('legacy','Read','denied'),@('legacy','Overwrite','denied'),@('legacy','Create','denied'))
@@ -362,6 +367,9 @@ function Add-PhaseAStage3Evidence($VerdictInput,$Evidence,[string]$EvidenceClass
         $VerdictInput.cases.aclInspection=@{state=$est.state;evidence=$EvidenceClass;reason=$est.reason;proof=$hash}
       }
     }
+    # Original access operations lack independent corroboration. Preserve the
+    # separate fixture, ACL and inventory evidence already processed above.
+    if($EvidenceClass -ceq 'LIVE_OBSERVED'){return}
     $probes=@($ActorJournal | Where-Object { $_.role -ceq 'legacy' -and $_.operation -ceq 'probe' })
     if ($probes.Count -ne 1) { return }
     $probe=$probes[0]; $probeObs=$probe.observation

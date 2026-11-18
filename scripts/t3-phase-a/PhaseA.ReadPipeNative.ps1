@@ -6,7 +6,9 @@ using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class PhaseAReadPipeNative {
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetNamedPipeClientProcessId(SafePipeHandle h,out uint pid);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool CancelIoEx(SafePipeHandle h,IntPtr overlapped);
  public static uint ClientPid(SafePipeHandle h) { uint p; if(!GetNamedPipeClientProcessId(h,out p)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); return p; }
+ public static string CancelPending(SafePipeHandle h) { if(CancelIoEx(h,IntPtr.Zero)) return "REQUESTED"; int error=Marshal.GetLastWin32Error(); if(error==1168) return "NOT_FOUND"; throw new System.ComponentModel.Win32Exception(error); }
 }
 "@
 }

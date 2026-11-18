@@ -5,6 +5,83 @@ using System;
 using System.Text;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.IO;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+public sealed class PhaseAEtlPipes : IDisposable {
+  [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public int inherit; }
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool CreatePipe(out IntPtr read,out IntPtr write,ref SecurityAttributes attributes,uint size);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  IntPtr stdoutRead,stdoutWrite,stderrRead,stderrWrite;
+  FileStream stdoutStream,stderrStream;
+  readonly MemoryStream stdout=new MemoryStream(),stderr=new MemoryStream();
+  readonly int stdoutLimit,stderrLimit;
+  Thread stdoutThread,stderrThread;
+  volatile bool overflow,readFailed;
+  bool writersClosed,disposed;
+  public IntPtr StdoutWrite {get{return stdoutWrite;}}
+  public IntPtr StderrWrite {get{return stderrWrite;}}
+  public bool Overflow {get{return overflow;}}
+  public bool ReadFailed {get{return readFailed;}}
+  static void Require(bool ok){if(!ok)throw new Win32Exception(Marshal.GetLastWin32Error());}
+  public PhaseAEtlPipes(int maxOut,int maxErr) {
+    if(maxOut<1 || maxErr<1)throw new ArgumentOutOfRangeException();
+    stdoutLimit=maxOut;stderrLimit=maxErr;
+    var sa=new SecurityAttributes{length=Marshal.SizeOf(typeof(SecurityAttributes)),inherit=1};
+    try {
+      Require(CreatePipe(out stdoutRead,out stdoutWrite,ref sa,0));
+      Require(SetHandleInformation(stdoutRead,1,0));
+      Require(CreatePipe(out stderrRead,out stderrWrite,ref sa,0));
+      Require(SetHandleInformation(stderrRead,1,0));
+    } catch {CloseRaw(stdoutRead);CloseRaw(stdoutWrite);CloseRaw(stderrRead);CloseRaw(stderrWrite);throw;}
+  }
+  static void CloseRaw(IntPtr h){if(h!=IntPtr.Zero)CloseHandle(h);}
+  public void CloseParentWriters(){
+    if(writersClosed)throw new InvalidOperationException("PIPE_WRITERS_ALREADY_CLOSED");
+    writersClosed=true;IntPtr a=stdoutWrite,b=stderrWrite;stdoutWrite=stderrWrite=IntPtr.Zero;
+    bool ok1=CloseHandle(a),ok2=CloseHandle(b);
+    if(!ok1||!ok2)throw new InvalidOperationException("PIPE_WRITER_CLOSE_FAILED");
+  }
+  void Drain(FileStream input,MemoryStream output,int limit){
+    byte[] b=new byte[4096];
+    try {
+      while(true){
+        int n=input.Read(b,0,b.Length);if(n==0)break;
+        int allowed=Math.Max(0,limit-(int)output.Length);
+        if(n>allowed)overflow=true;
+        if(allowed>0)output.Write(b,0,Math.Min(n,allowed));
+      }
+    } catch {readFailed=true;}
+  }
+  public void StartReaders(){
+    if(stdoutThread!=null)throw new InvalidOperationException("PIPE_READERS_ALREADY_STARTED");
+    stdoutStream=new FileStream(new SafeFileHandle(stdoutRead,true),FileAccess.Read,4096,false);stdoutRead=IntPtr.Zero;
+    stderrStream=new FileStream(new SafeFileHandle(stderrRead,true),FileAccess.Read,4096,false);stderrRead=IntPtr.Zero;
+    stdoutThread=new Thread(()=>Drain(stdoutStream,stdout,stdoutLimit)){IsBackground=true};
+    stderrThread=new Thread(()=>Drain(stderrStream,stderr,stderrLimit)){IsBackground=true};
+    stdoutThread.Start();stderrThread.Start();
+  }
+  public bool WaitReaders(int ms){
+    if(stdoutThread==null)return true;
+    var sw=System.Diagnostics.Stopwatch.StartNew();
+    if(!stdoutThread.Join(ms))return false;
+    return stderrThread.Join(Math.Max(0,ms-(int)sw.ElapsedMilliseconds));
+  }
+  public string StdoutText(){if(!WaitReaders(0))throw new InvalidOperationException("PIPE_READ_PENDING");return Encoding.UTF8.GetString(stdout.ToArray());}
+  public string StderrText(){if(!WaitReaders(0))throw new InvalidOperationException("PIPE_READ_PENDING");return Encoding.UTF8.GetString(stderr.ToArray());}
+  public void Dispose(){
+    if(disposed)return;
+    if(!WaitReaders(0))throw new InvalidOperationException("PIPE_READ_PENDING");
+    disposed=true;
+    bool ok=true;
+    if(!writersClosed){writersClosed=true;if(stdoutWrite!=IntPtr.Zero&&!CloseHandle(stdoutWrite))ok=false;stdoutWrite=IntPtr.Zero;if(stderrWrite!=IntPtr.Zero&&!CloseHandle(stderrWrite))ok=false;stderrWrite=IntPtr.Zero;}
+    if(stdoutStream!=null)stdoutStream.Dispose();else if(stdoutRead!=IntPtr.Zero&&!CloseHandle(stdoutRead))ok=false;
+    if(stderrStream!=null)stderrStream.Dispose();else if(stderrRead!=IntPtr.Zero&&!CloseHandle(stderrRead))ok=false;
+    stdout.Dispose();stderr.Dispose();
+    if(!ok)throw new InvalidOperationException("PIPE_CLOSE_FAILED");
+  }
+}
 public sealed class PhaseAHandleCloseResult {
   public string ThreadClose { get; private set; }
   public string ThreadError { get; private set; }
@@ -79,23 +156,33 @@ public sealed class EtherPhaseAAtomic : IDisposable {
     return CreateWithTokenInDirectory(token,job,app,command,System.IO.Path.GetTempPath());
   }
   public static EtherPhaseAAtomic CreateWithTokenInDirectory(IntPtr token, IntPtr job, string app, string command, string tempPath) {
-    return CreateCore(token,job,app,command,tempPath,false);
+    return CreateCore(token,job,app,command,tempPath,false,IntPtr.Zero,IntPtr.Zero);
   }
   public static EtherPhaseAAtomic CreateSelfInDirectory(IntPtr job, string app, string command, string tempPath) {
-    return CreateCore(IntPtr.Zero,job,app,command,tempPath,true);
+    return CreateCore(IntPtr.Zero,job,app,command,tempPath,true,IntPtr.Zero,IntPtr.Zero);
   }
-  static EtherPhaseAAtomic CreateCore(IntPtr token, IntPtr job, string app, string command, string tempPath, bool useSelf) {
+  public static EtherPhaseAAtomic CreateSelfWithPipes(IntPtr job,string app,string command,string tempPath,IntPtr stdoutWrite,IntPtr stderrWrite) {
+    if(stdoutWrite==IntPtr.Zero||stderrWrite==IntPtr.Zero||stdoutWrite==stderrWrite)throw new ArgumentException("pipes");
+    return CreateCore(IntPtr.Zero,job,app,command,tempPath,true,stdoutWrite,stderrWrite);
+  }
+  static EtherPhaseAAtomic CreateCore(IntPtr token, IntPtr job, string app, string command, string tempPath, bool useSelf,IntPtr stdoutWrite,IntPtr stderrWrite) {
     if ((!useSelf && token == IntPtr.Zero) || job == IntPtr.Zero || String.IsNullOrEmpty(app) || String.IsNullOrEmpty(command)) throw new ArgumentException();
     if (String.IsNullOrWhiteSpace(tempPath) || tempPath.IndexOf('\0')>=0 || tempPath.IndexOf('=')>=0) throw new ArgumentException();
-    IntPtr list=IntPtr.Zero, value=IntPtr.Zero, env=IntPtr.Zero, size=IntPtr.Zero;
+    IntPtr list=IntPtr.Zero, value=IntPtr.Zero, inherited=IntPtr.Zero, env=IntPtr.Zero, size=IntPtr.Zero;
+    bool withPipes=stdoutWrite!=IntPtr.Zero && stderrWrite!=IntPtr.Zero;
     bool initialized=false;
     try {
-      InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+      InitializeProcThreadAttributeList(IntPtr.Zero, withPipes?2:1, 0, ref size);
       if (size == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-      list=Marshal.AllocHGlobal(size); Require(InitializeProcThreadAttributeList(list,1,0,ref size)); initialized=true;
+      list=Marshal.AllocHGlobal(size); Require(InitializeProcThreadAttributeList(list,withPipes?2:1,0,ref size)); initialized=true;
       value=Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(value,job);
       Require(UpdateProcThreadAttribute(list,0,new IntPtr(0x2000d),value,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
       StartupInfoEx start=new StartupInfoEx(); start.startup.cb=Marshal.SizeOf(typeof(StartupInfoEx)); start.attributes=list;
+      if(withPipes) {
+        inherited=Marshal.AllocHGlobal(2*IntPtr.Size);Marshal.WriteIntPtr(inherited,0,stdoutWrite);Marshal.WriteIntPtr(inherited,IntPtr.Size,stderrWrite);
+        Require(UpdateProcThreadAttribute(list,0,new IntPtr(0x20002),inherited,new IntPtr(2*IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
+        start.startup.flags=0x100;start.startup.stdOut=stdoutWrite;start.startup.stdErr=stderrWrite;start.startup.stdIn=IntPtr.Zero;
+      }
       string windows=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
       if (String.IsNullOrEmpty(windows)) throw new InvalidOperationException("Windows directory unavailable");
       string system=System.IO.Path.Combine(windows,"System32");
@@ -104,13 +191,14 @@ public sealed class EtherPhaseAAtomic : IDisposable {
       byte[] envBytes=Encoding.Unicode.GetBytes(environment);
       env=Marshal.AllocHGlobal(envBytes.Length); Marshal.Copy(envBytes,0,env,envBytes.Length);
       ProcessInfo info;
-      if (useSelf) Require(CreateProcessW(app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,temp,ref start,out info));
+      if (useSelf) Require(CreateProcessW(app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,withPipes,0x00080404,env,temp,ref start,out info));
       else Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,temp,ref start,out info));
       return new EtherPhaseAAtomic(job,info);
     } finally {
       if(initialized) DeleteProcThreadAttributeList(list);
       if(list!=IntPtr.Zero) Marshal.FreeHGlobal(list);
       if(value!=IntPtr.Zero) Marshal.FreeHGlobal(value);
+      if(inherited!=IntPtr.Zero) Marshal.FreeHGlobal(inherited);
       if(env!=IntPtr.Zero) Marshal.FreeHGlobal(env);
     }
   }

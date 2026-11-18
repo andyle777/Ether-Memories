@@ -2,8 +2,42 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Inventory.ps1"
 . "$PSScriptRoot/PhaseA.ReadProcess.ps1"
+function Get-PhaseAOriginalReadCorrelation($Expected,$Candidate,$SeenRecordIds) {
+  # Diagnostic only: these normalized fields are not authenticated Windows events.
+  # In particular, nonce and file identity are manager-context fields, not 4663 fields.
+  $out=@{kind='ORIGINAL_ACTOR_READ';status='UNVERIFIED';reason='INDEPENDENT_OBSERVATION_MISSING'}
+  if($null -eq $Candidate){return $out}
+  try {
+    if($Candidate -isnot [hashtable] -or -not $Candidate.ContainsKey('source')){$out.reason='MALFORMED_OBSERVATION';return $out}
+    if($Candidate.source -ceq 'LIVE'){$out.reason='TRUSTED_COLLECTOR_NOT_CONNECTED';return $out}
+    if($Candidate.source -cne 'INJECTED' -or $Expected -isnot [hashtable]){$out.reason='MALFORMED_OBSERVATION';return $out}
+    $keys=@('experiment','nonce','pid','createdAt','sid','authenticationId','targetId','fileId')
+    foreach($key in $keys){if(-not $Expected.ContainsKey($key) -or -not $Candidate.ContainsKey($key)){$out.reason='MALFORMED_OBSERVATION';return $out}}
+    foreach($key in @('recordId','completed','eventLoss','nativeOutcome')){if(-not $Candidate.ContainsKey($key)){$out.reason='MALFORMED_OBSERVATION';return $out}}
+    if(-not $Expected.ContainsKey('actorOutcome') -or $Candidate.recordId -isnot [int] -or $Candidate.recordId -le 0 -or $Candidate.completed -isnot [bool] -or $Candidate.eventLoss -isnot [bool]){$out.reason='MALFORMED_OBSERVATION';return $out}
+    if($Candidate.experiment -cne $Expected.experiment){$out.reason='EXPERIMENT_MISMATCH';return $out}
+    if($Candidate.nonce -cne $Expected.nonce){$out.reason='NONCE_MISMATCH';return $out}
+    if($Candidate.pid -cne $Expected.pid -or $Candidate.createdAt -cne $Expected.createdAt){$out.reason='PROCESS_MISMATCH';return $out}
+    if($Candidate.sid -cne $Expected.sid -or $Candidate.authenticationId -cne $Expected.authenticationId){$out.reason='TOKEN_MISMATCH';return $out}
+    if($Candidate.targetId -cne $Expected.targetId -or $Candidate.fileId -cne $Expected.fileId){$out.reason='TARGET_MISMATCH';return $out}
+    if(@($SeenRecordIds) -contains $Candidate.recordId){$out.reason='REPLAYED_EVENT';return $out}
+    if($Candidate.eventLoss){$out.reason='EVENT_LOSS';return $out}
+    if(-not $Candidate.completed){$out.reason='COMPLETION_MISSING';return $out}
+    if($Candidate.nativeOutcome -cne $Expected.actorOutcome){$out.reason='CONTRADICTORY_OBSERVATION';return $out}
+    # A synthetic open or an absent read event cannot establish a read or denial.
+    if($Candidate.nativeOutcome -ceq 'DENIED'){$out.reason='DENIAL_NOT_INDEPENDENTLY_OBSERVED';return $out}
+    if(-not $Candidate.ContainsKey('eventKind') -or $Candidate.eventKind -cne 'READ'){$out.reason='READ_OPERATION_MISSING';return $out}
+    if(-not $Candidate.ContainsKey('requestedBytes') -or -not $Candidate.ContainsKey('completedBytes') -or $Candidate.requestedBytes -isnot [int] -or $Candidate.completedBytes -isnot [int] -or $Candidate.requestedBytes -le 0 -or $Candidate.completedBytes -lt 0 -or $Candidate.completedBytes -gt $Candidate.requestedBytes){$out.reason='INVALID_READ_COMPLETION';return $out}
+    $out.reason='INJECTED_MATCH_NOT_PROOF';return $out
+  } catch {$out.reason='MALFORMED_OBSERVATION';return $out}
+}
 function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Token,[string]$ExpectedSid,[string]$Operation,[string]$TargetId,[string]$EvidenceClass) {
   $failure=@{status='UNVERIFIED';reason='WITNESS_UNAVAILABLE';evidence=$EvidenceClass}
+  # LIVE results cannot be accepted until the original actor operation is
+  # independently corroborated; do not invoke an unverified witness probe.
+  if ($EvidenceClass -ceq 'LIVE') {
+    return @{status='UNVERIFIED';reason='ORIGINAL_OPERATION_UNCORROBORATED';evidence='LIVE'}
+  }
   try {
     if ($EvidenceClass -cnotin @('LIVE','INJECTED') -or $Token.sid -cne $ExpectedSid -or [string]::IsNullOrWhiteSpace($ExpectedSid) -or $Operation -cnotin @('Read','Overwrite','Create') -or $TargetId -cnotin @('protectedFile','deniedFile','controlFile','authorizedProbeFile','controlProbeFile')) { return $failure }
     if (($Operation -ceq 'Create' -and $TargetId -cnotin @('deniedFile','authorizedProbeFile','controlProbeFile')) -or ($Operation -ceq 'Overwrite' -and $TargetId -cnotin @('protectedFile','controlFile')) -or ($Operation -ceq 'Read' -and $TargetId -cnotin @('protectedFile','controlFile'))) { return $failure }
@@ -19,7 +53,7 @@ function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Tok
     if($EvidenceClass -ceq 'LIVE' -and -not $processEvidence){return $failure}
     $outcome=if ($raw.allowed -and $raw.error -eq 0) {'ALLOWED'} elseif (-not $raw.allowed -and $raw.error -eq 5) {'ACCESS_DENIED'} elseif (-not $raw.allowed -and $raw.error -in @(2,3,6,32,80,87,123,183)) { return @{status='UNVERIFIED';reason='NATIVE_ERROR';evidence=$EvidenceClass;operation=$Operation;target=$TargetId;nativeError=$raw.error} } else { return $failure }
     $result=@{status='OBSERVED';reason='NONE';evidence=$EvidenceClass;sid=$raw.sid;operation=$Operation;target=$TargetId;outcome=$outcome;nativeError=$raw.error;handlesClosed=$raw.handlesClosed}; if($processEvidence){$result.execution='PROCESS';$result.processVerified=$raw.processVerified;$result.terminated=$raw.terminated;$result.pid=$raw.pid;$result.createdAt=$raw.createdAt;$result.pipeClientPid=$raw.pipeClientPid;$result.nonce=$raw.nonce}else{$result.reverted=$raw.reverted};return $result
-  } catch { $code=$_.Exception.GetBaseException().Message; if ($code -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; if($code -ceq 'WITNESS_CLEANUP_FAILED'){throw 'WITNESS_CLEANUP_FAILED'}; if($code -ceq 'WITNESS_TIMEOUT') {return @{status='UNVERIFIED';reason=$code;evidence=$EvidenceClass}}; return $failure }
+  } catch { $code=$_.Exception.GetBaseException().Message; if ($code -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw }; if($code -ceq 'WITNESS_CLEANUP_FAILED'){throw}; if($code -ceq 'WITNESS_TIMEOUT') {return @{status='UNVERIFIED';reason=$code;evidence=$EvidenceClass}}; return $failure }
 }
 function Get-PhaseAInventorySnapshot($Backend,$Fixture,$Account,[string]$Control,[string]$Phase) {
   $positions=@{unauthorizedRead=0;unauthorizedWrite=1;unauthorizedCreate=2;unauthorizedRename=3;unauthorizedDelete=4}
@@ -39,6 +73,11 @@ function Get-PhaseAInventorySnapshot($Backend,$Fixture,$Account,[string]$Control
 function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBackend,[hashtable]$FixtureBackend,$Fixture,[hashtable]$Journal,[string]$Control,[string]$Operation,[string]$Target,[string]$TargetId) {
   $entry=@{control=$Control;operation=$Operation;target=$TargetId;accountSid=$Account.sid;tokenSid=$Token.sid;beforeExists=$null;parentExists=$null;beforeInventory=$null;beforeDigest=$null;afterExists=$null;afterInventory=$null;observation=$null;witness=$null}
   $Journal[$Control]=$entry
+  # The actor's self-report and a separate access witness do not establish the
+  # original read. Retain the gap even if a later actor or witness aborts.
+  if($Control -ceq 'unauthorizedRead' -and $Operation -ceq 'Read'){
+    $entry.originalReadEvidence=Get-PhaseAOriginalReadCorrelation $null $null @()
+  }
   $entry.beforeExists=& $FixtureBackend.Exists $Target
   if ($FixtureBackend.ContainsKey('DirectoryExists') -and $Fixture.ContainsKey('protectedDir')) { $entry.parentExists=& $FixtureBackend.DirectoryExists $Fixture.protectedDir }
   try { $entry.beforeInventory=& $FixtureBackend.Inventory $Fixture } catch { $entry['beforeDetails']=@{status='ERROR';reason='COLLECTION_FAILED';control=$Control;phase='BEFORE'}; throw 'INVENTORY_COLLECTION_FAILED' }
@@ -50,7 +89,14 @@ function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBa
     $value=Invoke-PhaseAActorOperation $Account $Token @{Run=$capture} $Operation $Target 'denied'
     if ($Operation -cin @('Read','Overwrite','Create') -and $FixtureBackend.ContainsKey('Probe')) {
       $class=if ($FixtureBackend.ContainsKey('WitnessEvidence') -and $FixtureBackend.WitnessEvidence -ceq 'LIVE') {'LIVE'} else {'INJECTED'}
-      $entry.witness=Invoke-PhaseATrustedAccess $FixtureBackend $Fixture $Token $Account.sid $Operation $TargetId $class
+      try{$entry.witness=Invoke-PhaseATrustedAccess $FixtureBackend $Fixture $Token $Account.sid $Operation $TargetId $class}
+      catch {
+        $ex=$_.Exception.GetBaseException();$prior=$ex.Data['PhaseAWitnessOutcome']
+        if($ex.Message -cin @('WITNESS_CLEANUP_FAILED','STAGE2_CHILD_UNCONFIRMED') -and $prior -is [hashtable] -and $prior.ContainsKey('operation') -and $prior.ContainsKey('target') -and $prior.ContainsKey('allowed') -and $prior.ContainsKey('nativeError') -and $prior.operation -ceq $Operation -and $prior.target -ceq $TargetId -and $prior.allowed -is [bool] -and $prior.nativeError -is [int]){
+          $entry.witness=@{status='UNVERIFIED';reason=$(if($ex.Message -ceq 'STAGE2_CHILD_UNCONFIRMED'){'CHILD_UNCONFIRMED'}else{'CLEANUP_FAILED'});evidence=$class;operation=$Operation;target=$TargetId;provisionalOutcome=$(if($prior.allowed){'ALLOWED'}else{'DENIED'});nativeError=$prior.nativeError}
+        }
+        throw
+      }
       if ($entry.witness.status -cne 'OBSERVED' -or $entry.witness.outcome -cne 'ACCESS_DENIED') { throw 'STAGE3_WITNESS_UNVERIFIED' }
     }
     return $value

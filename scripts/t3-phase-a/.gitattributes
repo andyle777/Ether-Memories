@@ -1,0 +1,6 @@
+PhaseA.EtwNative.Preparation.cs text eol=lf
+PhaseA.EtwLifecycle.cs text eol=lf
+gate-b-controller/*.cs text eol=lf
+gate-b-controller/*.csproj text eol=lf
+etl-decoder/*.cs text eol=lf
+etl-decoder/*.csproj text eol=lf

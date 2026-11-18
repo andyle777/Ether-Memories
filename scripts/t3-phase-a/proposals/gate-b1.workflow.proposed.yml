@@ -1,0 +1,106 @@
+# REVIEW ONLY: not an active workflow. Both the job and hosted source path are disabled.
+# Replace the zero source SHA only after source publication and a separate review.
+name: Gate B1 feasibility proposal - disabled
+on: workflow_dispatch
+permissions:
+  contents: read
+env:
+  APPROVED_SOURCE_SHA: '0000000000000000000000000000000000000000'
+jobs:
+  capture:
+    if: ${{ false }}
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.APPROVED_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Runtime, resource and locked-build preflight
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            if ($env:APPROVED_SOURCE_SHA -notmatch '^[a-f0-9]{40}$' -or $env:APPROVED_SOURCE_SHA -eq ('0' * 40)) { throw 'SOURCE_NOT_APPROVED' }
+            $head = (& git rev-parse HEAD 2>&1 | Select-Object -Last 1)
+            if ($LASTEXITCODE -ne 0 -or $head -cne $env:APPROVED_SOURCE_SHA) { throw 'SOURCE_MISMATCH' }
+            $sdk = (& dotnet --version 2>&1 | Select-Object -Last 1)
+            if ($LASTEXITCODE -ne 0 -or $sdk -cne '10.0.402') { throw 'SDK_UNAVAILABLE' }
+            & powershell.exe -NoProfile -NonInteractive -Command 'if ($PSVersionTable.PSVersion.Major -ne 5) { exit 1 }; Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop' 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'POWERSHELL_RUNTIME_UNAVAILABLE' }
+            $volume = Get-Volume -DriveLetter ([IO.Path]::GetPathRoot($env:RUNNER_TEMP).Substring(0,1))
+            if ($volume.FileSystem -ne 'NTFS' -or $volume.SizeRemaining -lt 2GB) { throw 'RESOURCE_UNAVAILABLE' }
+            if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'COLLECTOR_PRIVILEGE_UNVERIFIED' }
+            $base = 'scripts/t3-phase-a'
+            & dotnet restore "$base/gate-b-controller/GateBController.csproj" --locked-mode 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'RESTORE_FAILED' }
+            & dotnet restore "$base/etl-decoder/EtLDecoder.csproj" --locked-mode 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'RESTORE_FAILED' }
+            & dotnet build "$base/gate-b-controller/GateBController.csproj" --no-restore 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
+            & dotnet build "$base/etl-decoder/EtLDecoder.csproj" --no-restore 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
+            $manifest = Join-Path $base 'GATE-B-003-BUILD-HASHES.sha256'
+            $lines = @(Get-Content -LiteralPath $manifest)
+            if ($lines.Count -eq 0) { throw 'PIN_MANIFEST_INVALID' }
+            $expectedFiles = @()
+            foreach ($line in $lines) {
+              if ($line -cnotmatch '^([a-f0-9]{64})  ((gate-b-controller|etl-decoder)/bin/Debug/net10\.0/(?:amd64/|arm64/|x86/)?[A-Za-z0-9_.-]+)$') { throw 'PIN_MANIFEST_INVALID' }
+              $expected = $Matches[1]; $relative = $Matches[2]
+              if ($relative -cin $expectedFiles) { throw 'PIN_MANIFEST_INVALID' }
+              $expectedFiles += $relative
+              if ((Get-FileHash -LiteralPath (Join-Path $base $relative) -Algorithm SHA256).Hash -ine $expected) { throw 'PIN_MISMATCH' }
+            }
+            $actualFiles = @()
+            foreach ($dir in @('gate-b-controller/bin/Debug/net10.0','etl-decoder/bin/Debug/net10.0')) {
+              $directory = (Get-Item -LiteralPath (Join-Path $base $dir)).FullName
+              if (@(Get-ChildItem -LiteralPath $directory -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) { throw 'PIN_REPARSE' }
+              $actualFiles += @(Get-ChildItem -LiteralPath $directory -Recurse -File | Where-Object { $_.Extension -iin @('.exe','.dll','.json') } | ForEach-Object { "$dir/$($_.FullName.Substring($directory.Length+1).Replace('\','/'))" })
+            }
+            if (@(Compare-Object ($expectedFiles | Sort-Object) ($actualFiles | Sort-Object)).Count -ne 0) { throw 'PIN_MANIFEST_INCOMPLETE' }
+          } catch { throw 'GATE_B_PREFLIGHT_FAILED' }
+      - name: Capture, decode and validate
+        id: experiment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $base = 'scripts/t3-phase-a'
+            $private = Join-Path $env:RUNNER_TEMP ('orion-private-' + [guid]::NewGuid().ToString('N'))
+            $public = Join-Path $env:GITHUB_WORKSPACE 'gate-b-public'
+            $null = New-Item -ItemType Directory -Path $private,$public -ErrorAction Stop
+            $controller = (Get-FileHash "$base/gate-b-controller/bin/Debug/net10.0/GateBController.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+            $decoder = (Get-FileHash "$base/etl-decoder/bin/Debug/net10.0/EtLDecoder.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+            $summary = Join-Path $public 'unvalidated.json'
+            & powershell.exe -NoProfile -NonInteractive -File "$base/Invoke-GateBPipeline.ps1" -Mode HostedCapture -ParentDirectory $private -SourceSha $env:APPROVED_SOURCE_SHA -ExpectedControllerSha256 $controller -ExpectedDecoderSha256 $decoder -SummaryPath $summary 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { 'status=CAPTURED_UNTRUSTED' >> $env:GITHUB_OUTPUT } else { 'status=UNVERIFIED' >> $env:GITHUB_OUTPUT }
+          } catch { 'status=UNVERIFIED' >> $env:GITHUB_OUTPUT }
+      - name: Revalidate approved summary only
+        id: summary
+        if: ${{ always() }}
+        shell: pwsh
+        env:
+          JOB_CANCELLED: ${{ cancelled() }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            if ($env:JOB_CANCELLED -eq 'true') { Write-Output 'CANCELLED_UNVERIFIED'; exit 0 }
+            $public = Join-Path $env:GITHUB_WORKSPACE 'gate-b-public'
+            $inputPath = Join-Path $public 'unvalidated.json'
+            $outputPath = Join-Path $public 'approved-summary.json'
+            if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) { Write-Output 'MISSING_RECEIPT'; exit 0 }
+            & powershell.exe -NoProfile -NonInteractive -File 'scripts/t3-phase-a/Invoke-GateBPipeline.ps1' -Mode ValidateSummary -SummaryPath $inputPath -ValidatedSummaryPath $outputPath 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) { Write-Output 'SUMMARY_REJECTED'; exit 0 }
+            'approved=true' >> $env:GITHUB_OUTPUT
+          } catch { Write-Output 'SUMMARY_REJECTED' }
+      - name: Upload APPROVED_SUMMARY_ONLY
+        if: ${{ always() && steps.summary.outputs.approved == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gate-b1-allowlisted-summary
+          path: gate-b-public/approved-summary.json
+          if-no-files-found: error
+          retention-days: 1
+# Cancellation, an always() step, or a worker exit does not establish ETW stop
+# or VM disposal. Hard cancellation can prevent these diagnostics from running.
+# Do not upload raw ETL, raw receipts, stdout, stderr, or recovery journals.

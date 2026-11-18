@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>disable</Nullable><PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/..'))=/_/t3</PathMap><EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries><IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion></PropertyGroup>
+  <ItemGroup><Compile Remove="GateB003.TestBackend.cs"/><Compile Include="../PhaseA.EtwNative.Preparation.cs" Link="PhaseA.EtwNative.Preparation.cs"/><Compile Include="../PhaseA.EtwLifecycle.cs" Link="PhaseA.EtwLifecycle.cs"/></ItemGroup>
+</Project>
