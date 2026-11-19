@@ -1,6 +1,7 @@
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
 . "$PSScriptRoot/PhaseA.ReadProcess.ps1"
+. "$PSScriptRoot/PhaseA.ReadDiagnostic.ps1"
 $path=Join-Path ([IO.Path]::GetTempPath()) ('ether-read-process-test-'+[Guid]::NewGuid().ToString('N'))
 [IO.File]::WriteAllText($path,'synthetic')
 try {
@@ -26,8 +27,15 @@ try {
  Write-Output ('PASS identity control: '+$identityOutcome)
  $missing=Invoke-PhaseAReadPipeProcess $null $sid ($path+'.missing') 'protectedFile' '' $true
  if($missing.allowed -or $missing.error -ne 2){throw 'missing file not classified'}
- $caught=$false;$stallError='NO_EXCEPTION';try{$null=Invoke-PhaseAReadPipeProcess $null $sid $path 'protectedFile' '' $true $true}catch{$stallError=$_.Exception.GetBaseException().Message;$caught=$stallError -ceq 'WITNESS_TIMEOUT'}
- if(-not $caught){throw ('bounded stall was not rejected: '+$stallError)}
+ $stallReturned=$false;$stallException=$null;$stallRecord=@{}
+ try {$null=Invoke-PhaseAReadPipeProcess $null $sid $path 'protectedFile' '' $true $true 'Read' $stallRecord;$stallReturned=$true} catch {$stallException=$_}
+ $stallDiagnostic=Get-PhaseAStallDiagnostic $stallReturned $stallException $stallRecord
+ if($stallDiagnostic.outcome -cne 'EXPECTED_TIMEOUT'){
+  $message='STALL_CONTROL_'+$stallDiagnostic.outcome
+  if($null -ne $stallDiagnostic.nativeError){$message+=' NATIVE_'+$stallDiagnostic.nativeError}
+  if($stallDiagnostic.exception){throw [InvalidOperationException]::new($message,$stallDiagnostic.exception)}
+  throw $message
+ }
  Write-Output 'PASS process manager adapter, read, missing, wrong SID and stalled termination'
 } finally {if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
 $never=New-Object PSObject

@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.ReadPipeNative.ps1"
 . "$PSScriptRoot/PhaseA.ReadPipeReceipt.ps1"
+. "$PSScriptRoot/PhaseA.ReadDeadline.ps1"
 function Confirm-PhaseAReadChildTermination($Child) {
  try { if(-not $Child.Wait(5000)){$Child.Terminate();if(-not $Child.Wait(5000)){throw 'unconfirmed'}} }
  catch {throw 'STAGE2_CHILD_UNCONFIRMED'}
@@ -115,18 +116,24 @@ function Invoke-PhaseAReadPipeProcessCore($Token,[string]$ExpectedSid,[string]$T
   $LifecycleRecord.observedPid=$observed.pid;$LifecycleRecord.observedSid=$observed.sid;$LifecycleRecord.createdAt=$observed.createdAt;$LifecycleRecord.observedAuthenticationId=$observed.authenticationId;$LifecycleRecord.observedPrimary=$observed.primary
   if($observed.pid -ne $child.Pid -or $observed.sid -cne $ExpectedSid -or $observed.createdAt -cne $LifecycleRecord.launchCreatedAt){throw 'WITNESS_IDENTITY_REJECTED'}
   if(-not $TestCurrentIdentity){$post=[EtherPhaseANative]::InspectTokenHandle($launchHandle.DangerousGetHandle());foreach($key in @('tokenId','authenticationId','modifiedId')){if($post.$key -cne $stats.$key){throw 'WITNESS_IDENTITY_REJECTED'}};if(-not $observed.primary -or $observed.authenticationId -cne $stats.authenticationId){throw 'WITNESS_IDENTITY_REJECTED'}}
-  $clock=[Diagnostics.Stopwatch]::StartNew();$child.Resume()
-  if(-not $pendingWait.WaitOne(8000)){throw 'WITNESS_TIMEOUT'}
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  $deadlineClock={return [long]$clock.Elapsed.Ticks}.GetNewClosure()
+  $deadline=New-PhaseAWitnessDeadline $deadlineClock
+  $child.Resume()
+  $connectionWait={param($ms) return $pendingWait.WaitOne($ms)}.GetNewClosure()
+  if(-not (Invoke-PhaseAWitnessDeadlineWait $deadline 80000000 $connectionWait)){throw 'WITNESS_TIMEOUT'}
   $connectionEnded=$true;try{$pipe.EndWaitForConnection($pending);$connectionEndResult='ENDED'}catch{$connectionEndResult='ENDED_WITH_ERROR';throw};$clientPid=[PhaseAReadPipeNative]::ClientPid($pipe.SafePipeHandle)
   if($clientPid -ne $child.Pid){throw 'WITNESS_CLIENT_REJECTED'}
   $read=Invoke-PhaseAWitnessIoIssue $pipeOwner 'read' { $pipe.BeginRead($buffer,0,$buffer.Length,$null,$null) };$readWait=$read.AsyncWaitHandle
-  $remaining=[Math]::Max(0,10000-[int]$clock.ElapsedMilliseconds)
-  if(-not $readWait.WaitOne($remaining)){throw 'WITNESS_TIMEOUT'}
+  $readWaitCall={param($ms) return $readWait.WaitOne($ms)}.GetNewClosure()
+  if(-not (Invoke-PhaseAWitnessDeadlineWait $deadline 100000000 $readWaitCall)){throw 'WITNESS_TIMEOUT'}
   $readEnded=$true;try{$count=$pipe.EndRead($read);$readEndResult='ENDED'}catch{$readEndResult='ENDED_WITH_ERROR';throw};$parts=[Text.Encoding]::UTF8.GetString($buffer,0,$count).Split('|')
-  $remaining=[Math]::Max(0,10000-[int]$clock.ElapsedMilliseconds)
-  if(-not $child.Wait([uint32]$remaining)){throw 'WITNESS_TIMEOUT'}
-  if($child.ExitCode() -ne 0 -or -not (Test-PhaseAReadPipeReceipt $parts $nonce $child.Pid $clientPid $ExpectedSid $observed.createdAt $TargetId ($clock.ElapsedMilliseconds -le 10000) $Operation)){throw 'WITNESS_RECEIPT_REJECTED'}
+  $childWaitCall={param($ms) return $child.Wait([uint32]$ms)}.GetNewClosure()
+  if(-not (Invoke-PhaseAWitnessDeadlineWait $deadline 100000000 $childWaitCall)){throw 'WITNESS_TIMEOUT'}
+  if(-not (Test-PhaseAWitnessDeadline $deadline 100000000)){throw 'WITNESS_TIMEOUT'}
+  if($child.ExitCode() -ne 0 -or -not (Test-PhaseAReadPipeReceipt $parts $nonce $child.Pid $clientPid $ExpectedSid $observed.createdAt $TargetId $true $Operation)){throw 'WITNESS_RECEIPT_REJECTED'}
   if((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $hash){throw 'WITNESS_BINARY_MISMATCH'}
+  if(-not (Test-PhaseAWitnessDeadline $deadline 100000000)){throw 'WITNESS_TIMEOUT'}
   $LifecycleRecord.witnessOutcome=@{operation=$Operation;target=$TargetId;allowed=($parts[6] -ceq 'ALLOWED');nativeError=[int]$parts[7];pid=[int]$child.Pid;createdAt=$observed.createdAt;pipeClientPid=[int]$clientPid;nonce=$nonce;source=$LifecycleRecord.source}
   return @{execution='PROCESS';sid=$observed.sid;operation=$Operation;attempted=$true;allowed=($parts[6] -ceq 'ALLOWED');error=[int]$parts[7];processVerified=$true;terminated=$true;handlesClosed=$true;pid=$child.Pid;createdAt=$observed.createdAt;pipeClientPid=[int]$clientPid;nonce=$nonce}
  } catch {$LifecycleRecord.operationError=Get-PhaseAActorErrorCategory $_;$failure=$_.Exception.GetBaseException().Message;$LifecycleRecord.operationFailure=if($failure -cin @('WITNESS_TIMEOUT','WITNESS_IDENTITY_REJECTED','WITNESS_CONTAINMENT_FAILED','WITNESS_RECEIPT_REJECTED','WITNESS_CLIENT_REJECTED')){$failure}else{'WITNESS_OPERATION_FAILED'};if($LifecycleRecord.launch -ceq 'ATTEMPTED'){$LifecycleRecord.launch='FAILED'};if($LifecycleRecord.jobCreate -ceq 'ATTEMPTED'){$LifecycleRecord.jobCreate='FAILED'};throw} finally {
