@@ -19,12 +19,12 @@ $d=NewD;$script:t=[long]::MaxValue;Assert (-not (Test-PhaseAWitnessDeadline $d 1
 $d=NewD;$caught=$false;try{$null=Invoke-PhaseAWitnessDeadlineWait $d 0 $wait}catch{$caught=$true};Assert $caught 'ZERO_BUDGET_ACCEPTED'
 $d=NewD;$caught=$false;try{$null=Invoke-PhaseAWitnessDeadlineWait $d 100000000 {param($ms) throw 'WAIT_FAIL'}}catch{$caught=$_.Exception.GetBaseException().Message -ceq 'WAIT_FAIL'};Assert $caught 'WAIT_EXCEPTION_LOST'
 $caught=$false;try{$null=New-PhaseAWitnessDeadline {return 'malformed'}}catch{$caught=$true};Assert $caught 'MALFORMED_CLOCK_ACCEPTED'
-$script:phase='';$io=@{Cancel={param($p) $script:phase='REQUESTED';return 'REQUESTED'};Wait={param($w) if($script:phase -cne 'REQUESTED'){throw 'WAIT_BEFORE_CANCEL'};$script:t=[long]($script:t+100);return $true};EndConnection={param($p,$a) return 'CANCELED'};EndRead={param($p,$a) return 'CANCELED'};DisposeWait={param($w)};DisposePipe={param($p)}}
+$script:phase='';$io=@{Cancel={param($p) $script:phase='REQUESTED';return 'REQUESTED'};Wait={param($w,$ms) if($script:phase -cne 'REQUESTED'){throw 'WAIT_BEFORE_CANCEL'};$script:t=[long]($script:t+100);return $true};EndConnection={param($p,$a) return 'CANCELED'};EndRead={param($p,$a) return 'CANCELED'};DisposeWait={param($w)};DisposePipe={param($p)}}
 $r=@{};Assert (Complete-PhaseAWitnessPipeCleanup 'pipe' 'pending' $null 'wait' $null $false $false $r $io) 'DELAYED_CLEANUP_REJECTED';Assert ($r.pipeCancel -ceq 'REQUESTED' -and $r.connectionEnd -ceq 'CANCELED') 'CANCEL_NOT_CONFIRMED'
 Write-Output 'PASS production-shared deadline decisions, boundaries and delayed cancellation'
 $d=NewD;$script:advance=[long]1;$script:signal=$false;Assert (-not (Invoke-PhaseAWitnessDeadlineWait $d 100000000 $wait)) 'UNSIGNALED_ACCEPTED';$script:signal=$true
 $d=NewD;$caught=$false;try{$null=Invoke-PhaseAWitnessDeadlineWait $d 100000000 {param($ms) return 'true'}}catch{$caught=$_.Exception.GetBaseException().Message -ceq 'WITNESS_WAIT_UNVERIFIED'};Assert $caught 'MALFORMED_WAIT_ACCEPTED'
-$script:count=0;$io.Cancel={param($p) $script:count++;return 'REQUESTED'};$io.Wait={param($w) return $false}
+$script:count=0;$io.Cancel={param($p) $script:count++;return 'REQUESTED'};$io.Wait={param($w,$ms) return $false}
 foreach($i in 1..2){$r=@{};$ok=Complete-PhaseAWitnessPipeCleanup 'pipe' 'pending' $null 'wait' $null $false $false $r $io;Assert (-not $ok -and $r.pipeDispose -ceq 'RETAINED') 'REPEATED_CANCEL_RELEASED'}
 Assert ($script:count -eq 2) 'CANCELLATION_NOT_REQUESTED'
 Write-Output 'PASS malformed waits and repeated unconfirmed cancellation'

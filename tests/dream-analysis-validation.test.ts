@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { validateDreamPlan } from "../src/core/dreamValidation.js";
 import { DREAM_BUDGETS } from "../src/core/dreamRequest.js";
 import { planFor, requireValue, seedDreamCore } from "./helpers/dream-analysis.js";
@@ -100,11 +100,21 @@ describe("T4 cheap hostile plan validation", () => {
     const input = plan(); if (input.selector.kind !== "ids") throw Error("fixture");
     Object.defineProperty(input.selector.ids, "0", { value: "a", enumerable: false }); invalid(input);
   });
-  it("ignores a million unknown keys without enumerating caller containers", () => {
-    const input: any = plan(); for (let n = 0; n < 1000000; n++) input[`unknown${n}`] = n;
-    const original = Object.keys;
-    vi.spyOn(Object, "keys").mockImplementation(value => { if (value === input) throw Error("caller enumeration"); return original(value); });
-    expect(validateDreamPlan(input).ok).toBe(true);
+  describe("million unknown keys", () => {
+    let input: ReturnType<typeof plan> | undefined;
+    beforeAll(() => {
+      const fixture: any = plan();
+      for (let n = 0; n < 1000000; n++) fixture[`unknown${n}`] = n;
+      input = fixture;
+    }, 30000);
+    afterAll(() => { input = undefined; }, 5000);
+    it("ignores a million unknown keys without enumerating caller containers", () => {
+      if (!input) throw Error("missing million-key fixture");
+      const original = Object.keys;
+      vi.spyOn(Object, "keys").mockImplementation(value => { if (value === input) throw Error("caller enumeration"); return original(value); });
+      expect(() => Object.keys(input!)).toThrow("caller enumeration");
+      expect(validateDreamPlan(input).ok).toBe(true);
+    }, 5000);
   });
   it("enforces maxPlanBytes on the bounded projected plan", () => invalid({ ...plan(), budgets: { ...DREAM_BUDGETS, maxPlanBytes: 1 } }));
 });

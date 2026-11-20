@@ -34,10 +34,17 @@ function Get-PhaseAWitnessCompletionError($ErrorRecord) {
  return 'ERROR'
 }
 function Complete-PhaseAWitnessPipeCleanup($Pipe,$Pending,$Read,$PendingWait,$ReadWait,[bool]$ConnectionEnded,[bool]$ReadEnded,[hashtable]$Record,[hashtable]$Io=@{}) {
- if($Io.Count -eq 0){$Io=@{Cancel={param($p) [PhaseAReadPipeNative]::CancelPending($p.SafePipeHandle)};Wait={param($w) $w.WaitOne(5000)};EndConnection={param($p,$a) try{$p.EndWaitForConnection($a);return 'ENDED'}catch{return (Get-PhaseAWitnessCompletionError $_)}};EndRead={param($p,$a) try{$null=$p.EndRead($a);return 'ENDED'}catch{return (Get-PhaseAWitnessCompletionError $_)}};DisposeWait={param($w) $w.Dispose()};DisposePipe={param($p) $p.Dispose()}}}
+ if($Io.Count -eq 0){$Io=@{Cancel={param($p) [PhaseAReadPipeNative]::CancelPending($p.SafePipeHandle)};Wait={param($w,$ms) $w.WaitOne($ms)};EndConnection={param($p,$a) try{$p.EndWaitForConnection($a);return 'ENDED'}catch{return (Get-PhaseAWitnessCompletionError $_)}};EndRead={param($p,$a) try{$null=$p.EndRead($a);return 'ENDED'}catch{return (Get-PhaseAWitnessCompletionError $_)}};DisposeWait={param($w) $w.Dispose()};DisposePipe={param($p) $p.Dispose()}}}
  $Record.pipeCancel='NOT_ATTEMPTED';$Record.connectionEnd=if($ConnectionEnded){'ENDED'}else{'NOT_ATTEMPTED'};$Record.readEnd=if($ReadEnded){'ENDED'}else{'NOT_ATTEMPTED'}
  $ok=$true;$complete=$true
  if($null -eq $Pipe){return ($null -eq $Pending -and $null -eq $Read)}
+ # One monotonic budget bounds blocking I/O waits; a zero-time poll may still confirm completion.
+ $clockOk=$true;$cleanupDeadline=$null
+ try {
+  if($Io.ContainsKey('Clock')){$cleanupClock=$Io.Clock}
+  else {$cleanupStopwatch=[Diagnostics.Stopwatch]::StartNew();$cleanupClock={return [long]$cleanupStopwatch.Elapsed.Ticks}.GetNewClosure()}
+  $cleanupDeadline=New-PhaseAWitnessDeadline $cleanupClock
+ } catch {$clockOk=$false;$ok=$false}
  if(($Pending -and -not $ConnectionEnded) -or ($Read -and -not $ReadEnded)){
   try{$Record.pipeCancel=& $Io.Cancel $Pipe;if($Record.pipeCancel -cnotin @('REQUESTED','NOT_FOUND')){throw 'cancel result'}}catch{$Record.pipeCancel='FAILED';$ok=$false}
  }
@@ -46,7 +53,16 @@ function Complete-PhaseAWitnessPipeCleanup($Pipe,$Pending,$Read,$PendingWait,$Re
   if($null -eq $async){continue}
   if($ended){try{if($wait){$null=& $Io.DisposeWait $wait};$Record[$waitField]='DISPOSE_RETURNED'}catch [ObjectDisposedException] {$Record[$waitField]='FAILED';$ok=$false}catch{$Record[$waitField]='FAILED';$ok=$false};continue}
   if($null -eq $wait){$Record[$waitField]='UNCONFIRMED';$complete=$false;$ok=$false;continue}
-  try{$signaled=& $Io.Wait $wait;if($signaled -isnot [bool] -or -not $signaled){$Record[$waitField]='UNCONFIRMED';$complete=$false;$ok=$false;continue}}catch{$Record[$waitField]='UNCONFIRMED';$complete=$false;$ok=$false;continue}
+  try{
+   if(-not $clockOk){throw 'WITNESS_CLOCK_UNVERIFIED'}
+   $elapsed=Get-PhaseAWitnessDeadlineElapsed $cleanupDeadline
+   $remaining=[Math]::Max([long]0,[long](50000000-[Math]::Min([long]50000000,$elapsed)))
+   $ms=[int][Math]::Floor($remaining/10000.0)
+   $signaled=& $Io.Wait $wait $ms
+   if($signaled -isnot [bool]){throw 'WITNESS_WAIT_UNVERIFIED'}
+   $null=Get-PhaseAWitnessDeadlineElapsed $cleanupDeadline
+   if(-not $signaled){$Record[$waitField]='UNCONFIRMED';$complete=$false;$ok=$false;continue}
+  }catch{$clockOk=$false;$Record[$waitField]='UNCONFIRMED';$complete=$false;$ok=$false;continue}
   try{$end=if($endField -ceq 'connectionEnd'){& $Io.EndConnection $Pipe $async}else{& $Io.EndRead $Pipe $async};if($end -cnotin @('ENDED','CANCELED','ERROR')){throw 'end result'};$Record[$endField]=$end;if($end -ceq 'ERROR'){$complete=$false;$ok=$false;continue}}catch{$Record[$endField]='FAILED';$complete=$false;$ok=$false;continue}
   try{$null=& $Io.DisposeWait $wait;$Record[$waitField]='SIGNALED_DISPOSE_RETURNED'}catch [ObjectDisposedException] {$Record[$waitField]='FAILED';$ok=$false}catch{$Record[$waitField]='FAILED';$ok=$false}
  }

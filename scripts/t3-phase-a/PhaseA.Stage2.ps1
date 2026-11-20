@@ -1,5 +1,6 @@
 Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Core.ps1"
+. "$PSScriptRoot/PhaseA.ReadDeadline.ps1"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
 . "$PSScriptRoot/PhaseA.HostedSupervision.ps1"
@@ -173,9 +174,23 @@ function Invoke-PhaseAActorChildCleanup($Child,[hashtable]$Record,[hashtable]$Io
   $Record.firstWait='NOT_RUN';$Record.finalWait='NOT_RUN';$Record.termination='NOT_REQUESTED';$Record.exitState='UNKNOWN';$Record.exitCode=$null;$Record.atomicHandleClose='NOT_ATTEMPTED';$Record.processClose='NOT_ATTEMPTED';$Record.processCloseError='NONE';$Record.threadClose='NOT_ATTEMPTED';$Record.threadCloseError='NONE';$Record.error='NONE'
   $confirmed=$false;$cleanupFailed=$false
   try {
-    $signal=& $Io.Wait $Child 5000;if($signal -isnot [bool]){throw 'invalid wait'}
+    # Reserve most of the shared five-second wait budget for post-termination confirmation.
+    if($Io.ContainsKey('Clock')){$clock=$Io.Clock}
+    else {$stopwatch=[Diagnostics.Stopwatch]::StartNew();$clock={return [long]$stopwatch.Elapsed.Ticks}.GetNewClosure()}
+    $deadline=New-PhaseAWitnessDeadline $clock
+    $elapsed=Get-PhaseAWitnessDeadlineElapsed $deadline
+    $initial=[int][Math]::Floor([Math]::Max([long]0,[long](10000000-[Math]::Min([long]10000000,$elapsed)))/10000.0)
+    $signal=& $Io.Wait $Child $initial;if($signal -isnot [bool]){throw 'invalid wait'}
+    $null=Get-PhaseAWitnessDeadlineElapsed $deadline
     $Record.firstWait=if($signal){'SIGNALED'}else{'TIMEOUT'}
-    if(-not $signal){$Record.termination='REQUESTED';$null=& $Io.Terminate $Child;$signal=& $Io.Wait $Child 5000;if($signal -isnot [bool]){throw 'invalid wait'}}
+    if(-not $signal){
+      $Record.termination='REQUESTED';$null=& $Io.Terminate $Child
+      $elapsed=Get-PhaseAWitnessDeadlineElapsed $deadline
+      $remaining=[Math]::Max([long]0,[long](50000000-[Math]::Min([long]50000000,$elapsed)))
+      $ms=[int][Math]::Floor($remaining/10000.0)
+      $signal=& $Io.Wait $Child $ms;if($signal -isnot [bool]){throw 'invalid wait'}
+      $null=Get-PhaseAWitnessDeadlineElapsed $deadline
+    }
     if(-not $signal){$Record.finalWait='TIMEOUT';try{$exited=& $Io.Exited $Child;if($exited -is [bool] -and -not $exited){$Record.exitState='ALIVE'}}catch{}}
     else {$Record.finalWait='SIGNALED';$exited=& $Io.Exited $Child;if($exited -is [bool] -and $exited){$confirmed=$true;$Record.exitState='EXITED';try{$code=& $Io.ExitCode $Child;if($code -isnot [int]){throw 'invalid exit code'};$Record.exitCode=$code}catch{$cleanupFailed=$true;$Record.error=Get-PhaseAActorErrorCategory $_}}else{$Record.error='EXIT_UNCONFIRMED'}}
   }catch{if($Record.firstWait -ceq 'NOT_RUN'){$Record.firstWait='FAILED'};$Record.finalWait='FAILED';$Record.error=Get-PhaseAActorErrorCategory $_}
